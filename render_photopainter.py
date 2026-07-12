@@ -43,6 +43,56 @@ def _extract_exif_date(exif_json: str | None) -> str:
     return ""
 
 
+def _parse_crop_focus(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    required = ("x", "y", "w", "h")
+    if not all(key in value for key in required):
+        return None
+    return value
+
+
+def _safe_display_caption(side_caption: str, caption: str, ptype: str) -> str:
+    text = str(side_caption or "").strip()
+    if 4 <= len(text) <= 30 and "照片" not in text and "画面" not in text:
+        return text
+    combined = f"{ptype} {caption}"
+    if any(word in combined for word in ("孩子", "儿童", "小女孩", "小朋友")):
+        return "小手忙着搭一座新城"
+    if any(word in combined for word in ("猫", "宠物", "狗")):
+        return "它把日常占成了主角"
+    if any(word in combined for word in ("旅行", "风景", "山", "海", "湖")):
+        return "风景替脚步留了证词"
+    if any(word in combined for word in ("美食", "餐", "饭", "菜")):
+        return "胃先替记忆点了头"
+    if any(word in combined for word in ("文档", "票", "收据", "截图")):
+        return "一张纸也记得来路"
+    return "日常在这里轻轻落座"
+
+
+def _native_location_from_source(source: Path) -> str:
+    try:
+        from analyze_photos import get_city_resolver, read_exif
+
+        info = read_exif(source)
+        lat = info.get("gps_lat")
+        lon = info.get("gps_lon")
+        if lat is None or lon is None:
+            return ""
+        city = get_city_resolver()(float(lat), float(lon))
+        if city:
+            return city
+        return f"{float(lat):.4f}, {float(lon):.4f}"
+    except Exception:
+        return ""
+
+
 def _load_rows(db_path: Path, limit: int | None) -> list[dict[str, Any]]:
     if not db_path.exists():
         raise FileNotFoundError(f"找不到数据库文件: {db_path}")
@@ -50,8 +100,24 @@ def _load_rows(db_path: Path, limit: int | None) -> list[dict[str, Any]]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(photo_scores)").fetchall()
+        }
+        analysis_channel_expr = (
+            "analysis_channel" if "analysis_channel" in columns else "'' AS analysis_channel"
+        )
+        analysis_model_expr = (
+            "analysis_model" if "analysis_model" in columns else "'' AS analysis_model"
+        )
+        crop_focus_expr = (
+            "crop_focus_json" if "crop_focus_json" in columns else "'' AS crop_focus_json"
+        )
+        location_hint_expr = (
+            "location_hint" if "location_hint" in columns else "'' AS location_hint"
+        )
         rows = conn.execute(
-            """
+            f"""
             SELECT path,
                    caption,
                    type,
@@ -60,7 +126,11 @@ def _load_rows(db_path: Path, limit: int | None) -> list[dict[str, Any]]:
                    reason,
                    exif_json,
                    side_caption,
-                   exif_city
+                   exif_city,
+                   {location_hint_expr},
+                   {analysis_channel_expr},
+                   {analysis_model_expr},
+                   {crop_focus_expr}
             FROM photo_scores
             ORDER BY COALESCE(memory_score, -1) DESC,
                      COALESCE(beauty_score, -1) DESC,
@@ -75,17 +145,25 @@ def _load_rows(db_path: Path, limit: int | None) -> list[dict[str, Any]]:
         source = Path(str(row["path"]))
         if not source.exists():
             continue
+        caption = row["caption"] or ""
+        ptype = row["type"] or ""
+        side_caption = _safe_display_caption(row["side_caption"] or "", caption, ptype)
+        location = row["exif_city"] or _native_location_from_source(source)
         items.append(
             {
                 "source_path": str(source),
-                "caption": row["caption"] or "",
-                "type": row["type"] or "",
+                "caption": caption,
+                "type": ptype,
                 "memory_score": row["memory_score"],
                 "beauty_score": row["beauty_score"],
                 "reason": row["reason"] or "",
                 "exif_date": _extract_exif_date(row["exif_json"]),
-                "side_caption": row["side_caption"] or "",
-                "exif_city": row["exif_city"] or "",
+                "side_caption": side_caption,
+                "exif_city": location,
+                "location_hint": location,
+                "analysis_channel": row["analysis_channel"] or "",
+                "analysis_model": row["analysis_model"] or "",
+                "crop_focus": _parse_crop_focus(row["crop_focus_json"]),
             }
         )
         if limit is not None and len(items) >= limit:
@@ -99,13 +177,16 @@ def render_from_database(
     output_dir: str | Path,
     limit: int | None = None,
     width: int = 800,
-    height: int = 480,
+    height: int = 432,
+    final_height: int = 480,
+    caption_height: int = 48,
     mode: str = "scale",
     dither: str = DITHER_ATKINSON,
     brightness: float = 1.1,
     contrast: float = 1.2,
     saturation: float = 1.2,
     save_bmp: bool = True,
+    font_path: str | Path | None = None,
 ) -> dict[str, Any]:
     db = _resolve_path(db_path)
     out_dir = _resolve_path(output_dir)
@@ -128,6 +209,7 @@ def render_from_database(
             contrast=contrast,
             saturation=saturation,
             save_bmp=save_bmp,
+            crop_focus=item.get("crop_focus"),
         )
         render_item = {
             **item,
@@ -140,6 +222,9 @@ def render_from_database(
         "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
         "width": width,
         "height": height,
+        "final_width": width,
+        "final_height": final_height,
+        "caption_height": caption_height,
         "mode": mode,
         "dither": dither,
         "brightness": brightness,
@@ -171,13 +256,16 @@ def _load_config_defaults() -> dict[str, Any]:
         "output_dir": getattr(cfg, "RENDER_OUTPUT_DIR", "./output/photopainter"),
         "limit": getattr(cfg, "DAILY_PHOTO_QUANTITY", 5),
         "width": getattr(cfg, "RENDER_WIDTH", 800),
-        "height": getattr(cfg, "RENDER_HEIGHT", 480),
+        "height": getattr(cfg, "RENDER_HEIGHT", 432),
+        "final_height": getattr(cfg, "FINAL_RENDER_HEIGHT", 480),
+        "caption_height": getattr(cfg, "CAPTION_BAR_HEIGHT", 48),
         "mode": getattr(cfg, "RENDER_MODE", "scale"),
         "dither": getattr(cfg, "DITHER_MODE", DITHER_ATKINSON),
         "brightness": getattr(cfg, "BRIGHTNESS", 1.1),
         "contrast": getattr(cfg, "CONTRAST", 1.2),
         "saturation": getattr(cfg, "SATURATION", 1.2),
         "save_bmp": getattr(cfg, "SAVE_BMP_OUTPUT", True),
+        "font_path": getattr(cfg, "FONT_PATH", ""),
     }
 
 
@@ -207,12 +295,15 @@ def main() -> None:
         limit=args.limit,
         width=args.width,
         height=args.height,
+        final_height=defaults["final_height"],
+        caption_height=defaults["caption_height"],
         mode=args.mode,
         dither=args.dither,
         brightness=args.brightness,
         contrast=args.contrast,
         saturation=args.saturation,
         save_bmp=not args.no_bmp,
+        font_path=defaults["font_path"],
     )
     print(f"[OK] 已渲染 {len(manifest['renders'])} 张 PhotoPainter 预览图")
     print(f"[OK] 输出目录: {_resolve_path(args.output_dir)}")

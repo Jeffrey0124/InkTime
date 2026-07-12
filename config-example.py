@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 # 小样本相册目录。建议先放 10-30 张测试图片，确认流程和提示词效果后再扩大范围。
 IMAGE_DIR = "./sample_photos"
 
@@ -7,11 +9,23 @@ IMAGE_DIR = "./sample_photos"
 DB_PATH = "./photos.db"
 
 # OpenAI-compatible 视觉模型渠道，按优先级从高到低排列。
+# 运行逻辑：永远先请求 local_lmstudio；本地不可用、超时、HTTP 错误或输出 JSON 不合格时，
+# 自动切换到 cloud_qwen。真实云端 key 请放在本地 config.py 或环境变量里，不要提交。
 API_CHANNELS = [
     {
-        "api_url": "http://127.0.0.1:1234/v1/chat/completions",
+        "name": "local_lmstudio",
+        # 可以填 LM Studio 根地址；程序会自动补 /v1/chat/completions。
+        "api_url": "http://127.0.0.1:9100",
         "api_key": "",
-        "model_name": "qwen3-vl-32b-instruct",
+        "model_name": "google/gemma-4-31b-qat:2",
+        "timeout": 60,
+    },
+    {
+        "name": "cloud_qwen",
+        "api_url": "https://你的云端地址/compatible-mode/v1/chat/completions",
+        "api_key": os.environ.get("INKTIME_CLOUD_API_KEY", ""),
+        "model_name": "qwen3-vl-plus",
+        "timeout": 600,
     },
 ]
 
@@ -42,7 +56,9 @@ HOME_RADIUS_KM = 60.0
 # PhotoPainter Spectra 6 本地渲染输出。
 RENDER_OUTPUT_DIR = "./output/photopainter"
 RENDER_WIDTH = 800
-RENDER_HEIGHT = 480
+RENDER_HEIGHT = 432
+FINAL_RENDER_HEIGHT = 480
+CAPTION_BAR_HEIGHT = 48
 RENDER_ORIENTATION = "landscape"
 RENDER_MODE = "scale"
 DITHER_MODE = "atkinson"

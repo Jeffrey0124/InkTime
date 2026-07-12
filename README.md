@@ -14,8 +14,8 @@
 
 3. `server.py`
    提供本地 WebUI：
-   - `http://127.0.0.1:8765/renders` 查看渲染成品
-   - `http://127.0.0.1:8765/review` 查看分析结果
+   - `http://127.0.0.1:8766/renders` 查看渲染成品
+   - `http://127.0.0.1:8766/review` 查看分析结果
 
 ## 环境准备
 
@@ -41,7 +41,9 @@ IMAGE_DIR = "./sample_photos"
 DB_PATH = "./photos.db"
 RENDER_OUTPUT_DIR = "./output/photopainter"
 RENDER_WIDTH = 800
-RENDER_HEIGHT = 480
+RENDER_HEIGHT = 432
+FINAL_RENDER_HEIGHT = 480
+CAPTION_BAR_HEIGHT = 48
 RENDER_MODE = "scale"
 DITHER_MODE = "atkinson"
 BRIGHTNESS = 1.1
@@ -50,9 +52,52 @@ SATURATION = 1.2
 DAILY_PHOTO_QUANTITY = 5
 ```
 
+### 双通道视觉模型
+
+`API_CHANNELS` 按顺序尝试。当前推荐保留两路：
+
+```python
+API_CHANNELS = [
+    {
+        "name": "local_lmstudio",
+        "api_url": "http://127.0.0.1:9100",
+        "api_key": "",
+        "model_name": "google/gemma-4-31b-qat:2",
+        "timeout": 60,
+    },
+    {
+        "name": "cloud_qwen",
+        "api_url": "https://你的云端地址/compatible-mode/v1/chat/completions",
+        "api_key": "从环境变量或本地 config.py 读取",
+        "model_name": "qwen3-vl-plus",
+        "timeout": 600,
+    },
+]
+```
+
+运行逻辑：
+
+- 每张图先请求 `local_lmstudio`。
+- `api_url` 可以填 LM Studio 的根地址，例如 `http://127.0.0.1:9100`，程序会自动补成 `/v1/chat/completions`。
+- `model_name` 必须和 LM Studio 的 `/v1/models` 返回的 `id` 一致；如果只加载了 `google/gemma-4-12b-qat`，就不要填 `google/gemma-4-31b-qat`。
+- 本地模型不可用、超过该通道 `timeout`、HTTP 错误或主分析 JSON 缺字段/分数不可解析时，自动请求 `cloud_qwen`。
+- 数据库会记录 `analysis_channel` 和 `analysis_model`。
+- `/renders`、`/renders/<id>` 和 `/review` 会展示这张图实际由哪个通道分析。
+
 渲染调色板为 PhotoPainter / Spectra 6 六色：黑、白、黄、红、蓝、绿。默认按参考项目使用 `scale` 模式和 Atkinson dithering；也可把 `DITHER_MODE` 改为 `floyd-steinberg`。
 
-注意：这里的 `scale` / `cut` 沿用参考项目语义，`scale` 会填满 800x480 画布并居中裁切，`cut` 会保留完整画面并用白边补齐。
+注意：最终预览成品固定为 800x480，其中上方图像区为 800x432，底部文字条为 800x48。这里的 `scale` / `cut` 沿用参考项目语义，`scale` 会填满 800x432 图像区并按主体裁切，`cut` 会保留完整画面并用白边补齐。
+
+### 智能裁切
+
+`scale` 模式现在不是简单居中裁切，而是按以下优先级决定裁切窗口：
+
+1. `analyze_photos.py` 在识别照片时要求视觉模型输出 `crop_focus`，即主体/人脸/宠物脸/关键内容的相对坐标。
+2. `render_photopainter.py` 读取数据库中的 `crop_focus_json`，渲染时尽量让该区域完整留在 800x432 图像区内。
+3. 如果没有模型裁切范围，则尝试用 OpenCV 检测人脸并保住人脸。
+4. 如果以上都没有结果，才退回居中裁切。
+
+裁切算法会在不裁掉主体的前提下，尽量把主体中心放到黄金分割附近；多人合影会优先保住所有关键人脸。
 
 ## 运行
 
@@ -67,7 +112,7 @@ python server.py
 打开：
 
 ```text
-http://127.0.0.1:8765/renders
+http://127.0.0.1:8766/renders
 ```
 
 渲染产物位于：

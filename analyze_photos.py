@@ -6,6 +6,7 @@ import base64
 import json
 import sqlite3
 import os
+import re
 import subprocess
 import time
 import threading
@@ -133,7 +134,7 @@ DB_PATH = Path(str(getattr(cfg, "DB_PATH", "photos.db") or "photos.db")).expandu
 if not DB_PATH.is_absolute():
     DB_PATH = (ROOT_DIR / DB_PATH).resolve()
 
-# ---- 渠道列表（支持 429 自动切换） ----
+# ---- 渠道列表（按顺序优先，失败后自动切换） ----
 _raw_channels = getattr(cfg, "API_CHANNELS", None) or []
 if not _raw_channels:
     # 向后兼容：从旧的单变量配置构建单渠道
@@ -154,10 +155,9 @@ if not _raw_channels:
     ]
 
 API_CHANNELS: list[dict] = list(_raw_channels)
-_channel_index: int = 0  # 记住上次成功的渠道位置
 _channel_cooldown_until: list[float] = [0.0] * len(API_CHANNELS)
 _channel_inflight: list[int] = [0] * len(API_CHANNELS)
-_channel_lock = threading.Lock()  # 保护 _channel_index 的并发访问
+_channel_lock = threading.Lock()
 
 # 每次处理多少张；None 为不限制
 BATCH_LIMIT = getattr(cfg, "BATCH_LIMIT", None)
@@ -286,7 +286,11 @@ def ensure_table(conn: sqlite3.Connection) -> None:
             exif_gps_lon      REAL,
             exif_gps_alt      REAL,
             side_caption      TEXT,
-            exif_city         TEXT
+            exif_city         TEXT,
+            location_hint     TEXT,
+            analysis_channel  TEXT,
+            analysis_model    TEXT,
+            crop_focus_json   TEXT
         )
         """
     )
@@ -358,7 +362,76 @@ def ensure_table(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_city TEXT")
     except sqlite3.OperationalError:
         pass
+    try:
+        cur.execute("ALTER TABLE photo_scores ADD COLUMN location_hint TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE photo_scores ADD COLUMN analysis_channel TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE photo_scores ADD COLUMN analysis_model TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE photo_scores ADD COLUMN crop_focus_json TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
+
+_SIDE_CAPTION_BLOCKLIST = (
+    "这张照片",
+    "照片",
+    "画面",
+    "捕捉",
+    "描述",
+    "这一刻",
+    "那天",
+    "这里",
+    "这是",
+    "整个世界",
+    "整个夏天",
+    "刚刚好",
+)
+
+
+def _sanitize_side_caption(text: str | None) -> str | None:
+    """把模型输出压成真正可上屏的一句话；不合格则返回 None。"""
+    if not text:
+        return None
+    value = str(text).strip().strip("“”\"'` ")
+    if not value:
+        return None
+    value = value.replace("\r", " ").replace("\n", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    value = re.sub(r"^(文案|旁白|短句|输出)[:：]\s*", "", value).strip()
+    value = value.strip("“”\"'` 。.，,；;：:")
+    if not value:
+        return None
+    if any(word in value for word in _SIDE_CAPTION_BLOCKLIST):
+        return None
+    if len(value) < 4 or len(value) > 30:
+        return None
+    if len(re.findall(r"[。！？!?；;]", value)) > 1:
+        return None
+    return value
+
+
+def _fallback_side_caption(caption: str, ptype: str) -> str:
+    text = f"{ptype} {caption}"
+    if any(word in text for word in ("孩子", "儿童", "小女孩", "小朋友")):
+        return "小手忙着搭一座新城"
+    if any(word in text for word in ("猫", "宠物", "狗")):
+        return "它把日常占成了主角"
+    if any(word in text for word in ("旅行", "风景", "山", "海", "湖")):
+        return "风景替脚步留了证词"
+    if any(word in text for word in ("美食", "餐", "饭", "菜")):
+        return "胃先替记忆点了头"
+    if any(word in text for word in ("文档", "票", "收据", "截图")):
+        return "一张纸也记得来路"
+    return "日常在这里轻轻落座"
+
 
 # 生成一句话文案
 def generate_side_caption(image_path: Path) -> str | None:
@@ -368,7 +441,7 @@ def generate_side_caption(image_path: Path) -> str | None:
 
         "创作原则：\n"
         "1. 避免使用以下词语：世界、梦、时光、岁月、温柔、治愈、刚刚好、悄悄、慢慢 等（但不是绝对禁止）。\n"
-        "2. 严禁使用如下句式：……里……着整个世界；……里……着整个夏天；……得像……（简单的比喻）; ……比……还……； ……得比……更……。\n"
+        "2. 严禁使用如下句式：这里……；这是……；……里……着整个世界；……里……着整个夏天；……得像……（简单的比喻）; ……比……还……； ……得比……更……。\n"
         "3. 只基于图片中能确定的信息进行联想，不要虚构时间、人物关系、事件背景。\n"
         "4. 文案应自然、有趣，带一点幽默或者诗意，但请避免煽情、鸡汤。\n"
         "5. 不要复述画面内容本身，而是写“看完画面后，心里多出来的一句话”。\n"
@@ -381,8 +454,9 @@ def generate_side_caption(image_path: Path) -> str | None:
 
         "格式要求：\n"
         "1. 只输出一句中文短句，不要换行，不要引号，不要任何解释。\n"
-        "2. 建议长度 8～24 个汉字，最多不超过 30 个汉字。\n"
-        "3. 不要出现“这张照片”“这一刻”“那天”等指代照片本身的词。\n"
+        "2. 长度必须为 8～24 个汉字，最多不超过 30 个汉字。\n"
+        "3. 不要出现“照片”“画面”“这张照片”“这一刻”“那天”等指代照片本身的词。\n"
+        "4. 不能复述画面描述，不能写成长段落。\n"
     )
     user_prompt = "请基于这张照片，生成一句符合规则的中文文案。"
     try:
@@ -411,31 +485,28 @@ def generate_side_caption(image_path: Path) -> str | None:
                 },
             ],
             "temperature": 0.7,
-            "max_tokens": 64,
+            "max_tokens": 96,
             "top_p": 0.9,
             "stream": False,
         }
         return ch["api_url"], headers, body
 
-    try:
-        resp = _post_with_channel_fallback(_build, timeout=min(120, TIMEOUT))
-    except Exception:
-        return None
-
-    if not resp.ok:
-        return None
-
-    try:
+    def _parse_side_caption_response(resp):
         data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"].get("content", "")
+        caption = _sanitize_side_caption(content)
+        if not caption:
+            raise ValueError("一句话文案不符合长度或措辞规则")
+        return caption
+
+    try:
+        return _post_with_channel_fallback(
+            _build,
+            timeout=min(120, TIMEOUT),
+            response_parser=_parse_side_caption_response,
+        )
     except Exception:
         return None
-
-    if not isinstance(content, str):
-        content = str(content)
-
-    caption = content.strip().strip("“”\"'")
-    return caption or None
 
 
 def list_images(limit: int | None = None) -> list[Path]:
@@ -476,10 +547,20 @@ def filter_unscored(conn: sqlite3.Connection, paths: list[Path]) -> list[Path]:
     return [p for p in paths if str(p) not in already]
 
 
+def _gps_part_to_float(value) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        numerator, denominator = value
+        return float(numerator) / float(denominator)
+    except Exception:
+        return float(value)
+
+
 def _convert_gps_to_deg(value):
     try:
         d, m, s = value
-        return float(d[0]) / float(d[1]) + float(m[0]) / float(m[1]) / 60.0 + float(s[0]) / float(s[1]) / 3600.0
+        return _gps_part_to_float(d) + _gps_part_to_float(m) / 60.0 + _gps_part_to_float(s) / 3600.0
     except Exception:
         return None
 
@@ -597,6 +678,7 @@ def read_exif(path: Path) -> dict:
             lat_raw = gps_tags.get("GPSLatitude")
             lon_ref = gps_tags.get("GPSLongitudeRef")
             lon_raw = gps_tags.get("GPSLongitude")
+            alt_raw = gps_tags.get("GPSAltitude")
 
             if lat_raw and lat_ref:
                 lat = _convert_gps_to_deg(lat_raw)
@@ -606,6 +688,11 @@ def read_exif(path: Path) -> dict:
                 lon = _convert_gps_to_deg(lon_raw)
                 if lon is not None and lon_ref in ["W", "w"]:
                     lon = -lon
+            if alt_raw is not None:
+                try:
+                    info["gps_alt"] = _gps_part_to_float(alt_raw)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -622,6 +709,7 @@ def read_exif(path: Path) -> dict:
             lat_raw = gps_tags.get("GPSLatitude")
             lon_ref = gps_tags.get("GPSLongitudeRef")
             lon_raw = gps_tags.get("GPSLongitude")
+            alt_raw = gps_tags.get("GPSAltitude")
 
             if lat_raw and lat_ref:
                 lat = _convert_gps_to_deg(lat_raw)
@@ -631,6 +719,11 @@ def read_exif(path: Path) -> dict:
                 lon = _convert_gps_to_deg(lon_raw)
                 if lon is not None and lon_ref in ["W", "w"]:
                     lon = -lon
+            if alt_raw is not None:
+                try:
+                    info["gps_alt"] = _gps_part_to_float(alt_raw)
+                except Exception:
+                    pass
 
     info["gps_lat"] = lat
     info["gps_lon"] = lon
@@ -779,8 +872,7 @@ def _reserve_next_channel(tried: set[int]) -> int | None:
     n = len(API_CHANNELS)
     now = time.monotonic()
     with _channel_lock:
-        start = _channel_index % n
-        ordered = [(start + i) % n for i in range(n) if ((start + i) % n) not in tried]
+        ordered = [idx for idx in range(n) if idx not in tried]
 
         ready_idle: list[int] = []
         ready_busy: list[int] = []
@@ -829,17 +921,42 @@ def _mark_channel_failure(idx: int, ch_label: str, reason: str) -> None:
 
 
 def _mark_channel_success(idx: int) -> None:
-    global _channel_index
     with _channel_lock:
-        _channel_index = idx
         if 0 <= idx < len(_channel_cooldown_until):
             _channel_cooldown_until[idx] = 0.0
+
+
+def _channel_name(ch: dict) -> str:
+    return str(ch.get("name") or ch.get("model_name") or ch.get("api_url") or "unknown")
+
+
+def _channel_meta(ch: dict) -> dict[str, str]:
+    return {
+        "analysis_channel": _channel_name(ch),
+        "analysis_model": str(ch.get("model_name") or ""),
+    }
+
+
+def _normalize_chat_completions_url(url: str) -> str:
+    """允许配置 LM Studio 根地址，内部统一补成 OpenAI Chat Completions 端点。"""
+    normalized = str(url or "").strip().rstrip("/")
+    if not normalized:
+        return normalized
+    known_suffixes = (
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/compatible-mode/v1/chat/completions",
+    )
+    if normalized.endswith(known_suffixes):
+        return normalized
+    return normalized + "/v1/chat/completions"
 
 
 def _post_with_channel_fallback(
     payload_builder,
     timeout: float = TIMEOUT,
     response_parser=None,
+    return_channel: bool = False,
 ) -> requests.Response | tuple:
     """依次尝试各渠道发送请求，遇到错误自动切换到下一个渠道。
 
@@ -869,11 +986,13 @@ def _post_with_channel_fallback(
         tried.add(idx)
         ch = API_CHANNELS[idx]
         url, headers, body = payload_builder(ch)
-        ch_label = ch.get("model_name", url)
+        url = _normalize_chat_completions_url(url)
+        ch_label = _channel_name(ch)
+        channel_timeout = float(ch.get("timeout", timeout) or timeout)
 
         try:
             try:
-                resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+                resp = requests.post(url, headers=headers, json=body, timeout=channel_timeout)
             except Exception as e:
                 print(f"[WARN] 渠道 {ch_label} 请求异常：{e}，尝试下一个渠道")
                 last_error = str(e)
@@ -913,10 +1032,16 @@ def _post_with_channel_fallback(
                     _mark_channel_failure(idx, ch_label, f"响应解析失败：{e}")
                     continue
                 _mark_channel_success(idx)
+                print(f"[INFO] 使用模型通道：{ch_label} ({ch.get('model_name', '')})")
+                if return_channel:
+                    return parsed, _channel_meta(ch)
                 return parsed
 
             # 无 parser，直接返回 response
             _mark_channel_success(idx)
+            print(f"[INFO] 使用模型通道：{ch_label} ({ch.get('model_name', '')})")
+            if return_channel:
+                return resp, _channel_meta(ch)
             return resp
         finally:
             _release_channel(idx)
@@ -927,6 +1052,120 @@ def _post_with_channel_fallback(
     )
 
 
+def _extract_json_object(content: str) -> dict:
+    text = str(content or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            obj, _ = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError("未找到有效 JSON 对象")
+
+
+def _parse_box_tag(value, image_width=None, image_height=None) -> dict | None:
+    text = str(value or "")
+    match = re.search(
+        r"<box>\s*\(?\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)?\s*</box>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    ymin, xmin, ymax, xmax = [float(part) for part in match.groups()]
+    max_value = max(abs(ymin), abs(xmin), abs(ymax), abs(xmax))
+    try:
+        img_w = float(image_width or 0)
+        img_h = float(image_height or 0)
+    except (TypeError, ValueError):
+        img_w = img_h = 0
+
+    if max_value <= 1.0:
+        x1, y1, x2, y2 = xmin, ymin, xmax, ymax
+    elif max_value <= 1000.0:
+        x1, y1, x2, y2 = xmin / 1000.0, ymin / 1000.0, xmax / 1000.0, ymax / 1000.0
+    elif img_w > 0 and img_h > 0:
+        x1, y1, x2, y2 = xmin / img_w, ymin / img_h, xmax / img_w, ymax / img_h
+    else:
+        return None
+
+    left = max(0.0, min(1.0, min(x1, x2)))
+    top = max(0.0, min(1.0, min(y1, y2)))
+    right = max(0.0, min(1.0, max(x1, x2)))
+    bottom = max(0.0, min(1.0, max(y1, y2)))
+    if right - left <= 0.02 or bottom - top <= 0.02:
+        return None
+    return {
+        "x": round(left, 4),
+        "y": round(top, 4),
+        "w": round(right - left, 4),
+        "h": round(bottom - top, 4),
+        "reason": "视觉定位框",
+    }
+
+
+def _normalize_crop_focus(value, image_width=None, image_height=None) -> dict | None:
+    if isinstance(value, str):
+        return _parse_box_tag(value, image_width=image_width, image_height=image_height)
+    if not isinstance(value, dict):
+        return None
+    for key in ("crop_focus_box", "box", "bbox"):
+        if key in value:
+            parsed = _parse_box_tag(value.get(key), image_width=image_width, image_height=image_height)
+            if parsed:
+                parsed["reason"] = str(value.get("reason") or parsed["reason"]).strip()[:80]
+                return parsed
+    try:
+        x = float(value.get("x"))
+        y = float(value.get("y"))
+        w = float(value.get("w"))
+        h = float(value.get("h"))
+    except (TypeError, ValueError):
+        return None
+    if w <= 0.02 or h <= 0.02:
+        return None
+    x = max(0.0, min(1.0, x))
+    y = max(0.0, min(1.0, y))
+    right = max(0.0, min(1.0, x + w))
+    bottom = max(0.0, min(1.0, y + h))
+    w = right - x
+    h = bottom - y
+    if w <= 0.02 or h <= 0.02:
+        return None
+    return {
+        "x": round(x, 4),
+        "y": round(y, 4),
+        "w": round(w, 4),
+        "h": round(h, 4),
+        "reason": str(value.get("reason") or "").strip()[:80],
+    }
+
+
+def _normalize_location_hint(value) -> str:
+    text = str(value or "").strip()
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"\s+", " ", text).strip(" -，,。；;")
+    if not text or text.lower() in {"unknown", "none", "null", "n/a"}:
+        return ""
+    for banned in ("无法确定", "不能确定", "不确定", "未知", "看不出"):
+        if banned in text:
+            return ""
+    return text[:12]
+
+
 def call_vlm(image_path: Path) -> dict:
     try:
         img_b64 = encode_image_to_b64(image_path)
@@ -935,6 +1174,8 @@ def call_vlm(image_path: Path) -> dict:
 
     exif_info = read_exif(image_path)
     exif_json = json.dumps(exif_info, ensure_ascii=False, default=str)
+    image_width = exif_info.get("width") or "未知"
+    image_height = exif_info.get("height") or "未知"
 
     system_prompt = (
         "你是一个“个人相册照片评估助手”，擅长理解真实照片的内容，并从回忆价值和美观角度打分。\n"
@@ -943,7 +1184,9 @@ def call_vlm(image_path: Path) -> dict:
         "2）判断照片的大致类型：人物/孩子/猫咪/家庭/旅行/风景/美食/宠物/日常/文档/杂物/其他，一张照片可以有不止一个类型。\n"
         "3）给出 0~100 的“值得回忆度” memory_score（精确到一位小数），\n"
         "4）给出 0~100 的“美观程度” beauty_score（精确到一位小数），\n"
-        "5）用简短中文 reason 解释原因（不超过 40 字）。\n\n"
+        "5）用简短中文 reason 解释原因（不超过 40 字），\n"
+        "6）给出建议裁切关注区域 crop_focus，供 800x480 墨水屏裁切时尽量保住主体。\n"
+        "不要推测城市、景点、场馆、店名或地点；地理位置只由照片原生 EXIF/GPS 元数据处理。\n\n"
 
         "【值得回忆度（memory_score）评分方法】\n"
         "请先按照值得回忆的程度，先确定照片的'得分区间'，再进行精调：\n"
@@ -978,15 +1221,23 @@ def call_vlm(image_path: Path) -> dict:
         "{\n"
         "  \"caption\": \"……\",\n"
         "  \"type\": \"人物/家庭/旅行/…… 可以带多个type\",\n"
-        "  \"memory_score\": 0.0-100.0 的数字, 精确到 1 位小数\n"
-        "  \"beauty_score\": 0.0-100.0 的数字, 精确到 1 位小数\n"
-        "  \"reason\": \"不超过 60 字的中文理由\"\n"
+        "  \"memory_score\": 0.0-100.0 的数字, 精确到 1 位小数,\n"
+        "  \"beauty_score\": 0.0-100.0 的数字, 精确到 1 位小数,\n"
+        "  \"reason\": \"不超过 60 字的中文理由\",\n"
+        "  \"crop_focus\": {\"x\": 0.0-1.0, \"y\": 0.0-1.0, \"w\": 0.0-1.0, \"h\": 0.0-1.0, \"reason\": \"为什么保住这个区域\"}\n"
         "}\n"
-        "不要输出任何多余文字，不要加注释。"
+        "crop_focus 坐标系必须是归一化浮点数 0.0~1.0：左上角为 (0,0)，右下角为 (1,1)。\n"
+        "Few-Shot 示例：如果主体位于画面中间偏右、占画面约 30% 宽和 45% 高，输出：\n"
+        "{\"crop_focus\":{\"x\":0.48,\"y\":0.18,\"w\":0.30,\"h\":0.45,\"reason\":\"主体在中间偏右\"}}\n"
+        "如果模型只能输出通义千问视觉定位标签，请把它放进 JSON 字段 crop_focus_box，例如：\n"
+        "{\"crop_focus_box\":\"<box>(180,480,630,780)</box>\"}\n"
+        "多人群聚或合影时，优先锁定正中间最核心的 2-3 位主角人脸，或选择刚好塞进所有关键人脸的最小关注框；不要为了构图好看裁掉脸。\n"
+        "无人类/宠物但有山峰、太阳、建筑等主体时，也要返回主体 crop_focus，方便后续靠近 0.382 或 0.618 的黄金分割位置。\n"
+        "纯空旷风景可以用画面中心主要区域，并尽量让纵向三分线保留天空或地面层次。不要输出任何多余文字，不要加注释。"
     )
 
     user_text = (
-        "下面是照片的内容，请结合图像本身完成上述任务。\n"
+        f"下面是照片的内容，请结合图像本身完成上述任务。图片尺寸约为 {image_width}x{image_height}。\n"
     )
 
     def _build(ch):
@@ -1020,12 +1271,34 @@ def call_vlm(image_path: Path) -> dict:
         """解析 VLM 响应，失败时抛异常以触发渠道切换。"""
         data = resp.json()
         content = data["choices"][0]["message"]["content"].strip()
-        obj = json.loads(content)
+        if content.startswith("```"):
+            content = content.strip("`").strip()
+            if content.lower().startswith("json"):
+                content = content[4:].strip()
+        obj = _extract_json_object(content)
+        required = ("caption", "type", "memory_score", "beauty_score", "reason")
+        missing = [key for key in required if key not in obj]
+        if missing:
+            raise ValueError(f"JSON 缺少字段: {', '.join(missing)}")
+        float(obj["memory_score"])
+        float(obj["beauty_score"])
+        focus_source = obj.get("crop_focus") or obj.get("crop_focus_box") or content
+        obj["crop_focus"] = _normalize_crop_focus(
+            focus_source,
+            image_width=image_width if isinstance(image_width, int) else None,
+            image_height=image_height if isinstance(image_height, int) else None,
+        )
+        obj["location_hint"] = ""
         return obj
 
-    result = _post_with_channel_fallback(_build, timeout=TIMEOUT, response_parser=_parse_vlm_response)
+    result, channel_meta = _post_with_channel_fallback(
+        _build,
+        timeout=TIMEOUT,
+        response_parser=_parse_vlm_response,
+        return_channel=True,
+    )
 
-    return result, exif_info
+    return result, exif_info, channel_meta
 
 
 def _process_one_photo(path: Path, city_resolver) -> dict | None:
@@ -1036,7 +1309,7 @@ def _process_one_photo(path: Path, city_resolver) -> dict | None:
     """
     t_photo_start = time.perf_counter()
     try:
-        result, exif_info = call_vlm(path)
+        result, exif_info, channel_meta = call_vlm(path)
     except Exception as e:
         print(f"[WARN] 调用模型失败: {e}")
         return None
@@ -1052,8 +1325,12 @@ def _process_one_photo(path: Path, city_resolver) -> dict | None:
     except Exception:
         beauty_score = 0.0
     reason = str(result.get("reason", "")).strip()
+    crop_focus = _normalize_crop_focus(result.get("crop_focus"))
+    location_hint = ""
 
-    side_caption = generate_side_caption(path)
+    side_caption = _sanitize_side_caption(generate_side_caption(path))
+    if not side_caption:
+        side_caption = _fallback_side_caption(caption, ptype)
 
     width = exif_info.get("width")
     height = exif_info.get("height")
@@ -1107,6 +1384,7 @@ def _process_one_photo(path: Path, city_resolver) -> dict | None:
         "orientation": orientation,
         "exif_json": json.dumps(exif_info, ensure_ascii=False, default=str),
         "raw_json": json.dumps(result, ensure_ascii=False),
+        "crop_focus_json": json.dumps(crop_focus, ensure_ascii=False) if crop_focus else "",
         "exif_datetime": exif_datetime,
         "exif_make": exif_make,
         "exif_model": exif_model_val,
@@ -1119,6 +1397,9 @@ def _process_one_photo(path: Path, city_resolver) -> dict | None:
         "exif_gps_alt": exif_gps_alt,
         "side_caption": side_caption,
         "exif_city": exif_city,
+        "location_hint": exif_city,
+        "analysis_channel": channel_meta.get("analysis_channel", ""),
+        "analysis_model": channel_meta.get("analysis_model", ""),
         "cost": t_photo_end - t_photo_start,
     }
 
@@ -1133,13 +1414,15 @@ def _save_result_to_db(cur, conn, rec: dict):
          exif_json, raw_json,
          exif_datetime, exif_make, exif_model,
          exif_iso, exif_exposure_time, exif_f_number, exif_focal_length,
-         exif_gps_lat, exif_gps_lon, exif_gps_alt, side_caption, exif_city)
+         exif_gps_lat, exif_gps_lon, exif_gps_alt, side_caption, exif_city,
+         location_hint, analysis_channel, analysis_model, crop_focus_json)
         VALUES (?, ?, ?, ?, ?, ?,
                 ?, ?, ?, COALESCE((SELECT used_at FROM photo_scores WHERE path = ?), NULL),
                 ?, ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?, ?, ?)
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?)
         """,
         (
             rec["path"],
@@ -1166,6 +1449,10 @@ def _save_result_to_db(cur, conn, rec: dict):
             rec["exif_gps_alt"],
             rec["side_caption"],
             rec["exif_city"],
+            rec["location_hint"],
+            rec["analysis_channel"],
+            rec["analysis_model"],
+            rec["crop_focus_json"],
         ),
     )
     conn.commit()
@@ -1173,6 +1460,7 @@ def _save_result_to_db(cur, conn, rec: dict):
 
 def _print_result(rec: dict):
     """打印单张照片处理结果摘要。"""
+    print(f"  分析通道：{rec.get('analysis_channel') or '-'} ({rec.get('analysis_model') or '-'})")
     print(f"  类型    ：{rec['type']}")
     print(f"  回忆分  ：{rec['memory_score']:.1f}")
     print(f"  美观分  ：{rec['beauty_score']:.1f}")
@@ -1180,6 +1468,8 @@ def _print_result(rec: dict):
         print(f"  一句话文案：{rec['side_caption']}")
     else:
         print("  一句话文案：(无)")
+    if rec.get("crop_focus_json"):
+        print(f"  裁切关注区：{rec['crop_focus_json']}")
     print(f"  画面描述：{rec['caption']}")
     print(f"  理由    ：{rec['reason']}")
 

@@ -57,7 +57,7 @@ http://127.0.0.1:8766/renders
 
 用户希望技术文档和说明尽可能使用中文。README、配置说明、运行步骤优先写中文；英文 README 可以保留但不是第一优先级。
 
-大模型使用 OpenAI-compatible 接口。曾经配置过阿里云百炼兼容模式和 `qwen3-vl-plus`，但不要在任何文档、回复、测试或提交中写出真实 API key。
+大模型使用 OpenAI-compatible 接口。当前应保留双通道：`local_lmstudio` 优先使用本机 LM Studio 根地址，例如 `http://127.0.0.1:9100`，程序会自动补 `/v1/chat/completions`；`model_name` 必须和 `/v1/models` 返回的 id 一致。`cloud_qwen` 作为云端兜底使用 `qwen3-vl-plus`。不要在任何文档、回复、测试或提交中写出真实 API key。
 
 本地私有配置放在 `config.py`，公开模板放在 `config-example.py`。常用字段：
 
@@ -67,6 +67,11 @@ DB_PATH = "./photos.db"
 BATCH_LIMIT = 1
 FLASK_HOST = "127.0.0.1"
 FLASK_PORT = 8766
+
+API_CHANNELS = [
+    {"name": "local_lmstudio", "api_url": "http://127.0.0.1:9100", "api_key": "", "model_name": "google/gemma-4-12b-qat", "timeout": 100},
+    {"name": "cloud_qwen", "api_url": "https://你的云端地址/compatible-mode/v1/chat/completions", "api_key": "从环境变量或本地 config.py 读取", "model_name": "qwen3-vl-plus"},
+]
 
 RENDER_OUTPUT_DIR = "./output/photopainter"
 RENDER_WIDTH = 800
@@ -95,6 +100,8 @@ SATURATION = 1.2
 
 改提示词时要保持这些字段稳定，避免破坏 `render_photopainter.py` 和 `server.py` 读取逻辑。
 
+主分析会把实际使用的通道写入 `analysis_channel` 和 `analysis_model`。如果本地模型不可用、超时、HTTP 错误或主分析 JSON 缺字段/分数不可解析，应自动 fallback 到云端，并在日志、manifest 和页面中显示最终通道。
+
 ## PhotoPainter E6 渲染要点
 
 渲染算法已经按 Toon-nooT PhotoPainter E-Ink Spectra 6 converter 的核心思路调整：
@@ -120,6 +127,7 @@ python -m unittest tests.test_photopainter_renderer -v
 - 输出颜色只能属于六色调色板。
 - Atkinson 和 Floyd-Steinberg 都能生成图片。
 - `scale` 和 `cut` 的语义不能反过来。
+- `scale` 模式裁切优先级是 VLM `crop_focus` > OpenCV 人脸检测 > 居中裁切；目标是尽量不裁掉人脸/主体，并在可行时把主体放到黄金分割附近。
 
 ## WebUI 经验
 

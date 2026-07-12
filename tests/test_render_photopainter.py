@@ -33,15 +33,19 @@ class RenderPhotoPainterFlowTests(unittest.TestCase):
                     reason TEXT,
                     exif_json TEXT,
                     side_caption TEXT,
-                    exif_city TEXT
+                    exif_city TEXT,
+                    location_hint TEXT,
+                    analysis_channel TEXT,
+                    analysis_model TEXT,
+                    crop_focus_json TEXT
                 )
                 """
             )
             conn.execute(
                 """
                 INSERT INTO photo_scores
-                (path, caption, type, memory_score, beauty_score, reason, exif_json, side_caption, exif_city)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (path, caption, type, memory_score, beauty_score, reason, exif_json, side_caption, exif_city, location_hint, analysis_channel, analysis_model, crop_focus_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(source_a),
@@ -53,13 +57,17 @@ class RenderPhotoPainterFlowTests(unittest.TestCase):
                     '{"datetime": "2024:01:02 03:04:05"}',
                     "A warm red memory",
                     "Shenzhen",
+                    "KID Park",
+                    "local_lmstudio",
+                    "google/gemma-4-31b-qat:2",
+                    '{"x": 0.2, "y": 0.3, "w": 0.4, "h": 0.5, "reason": "主体"}',
                 ),
             )
             conn.execute(
                 """
                 INSERT INTO photo_scores
-                (path, caption, type, memory_score, beauty_score, reason, exif_json, side_caption, exif_city)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (path, caption, type, memory_score, beauty_score, reason, exif_json, side_caption, exif_city, location_hint, analysis_channel, analysis_model, crop_focus_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(source_b),
@@ -71,6 +79,10 @@ class RenderPhotoPainterFlowTests(unittest.TestCase):
                     '{"datetime": "2023:05:06 07:08:09"}',
                     "A blue day",
                     "Guangzhou",
+                    "",
+                    "cloud_qwen",
+                    "qwen3-vl-plus",
+                    "",
                 ),
             )
             conn.commit()
@@ -81,7 +93,9 @@ class RenderPhotoPainterFlowTests(unittest.TestCase):
                 output_dir=output_dir,
                 limit=2,
                 width=800,
-                height=480,
+                height=432,
+                final_height=480,
+                caption_height=48,
                 dither="none",
                 save_bmp=False,
             )
@@ -95,8 +109,14 @@ class RenderPhotoPainterFlowTests(unittest.TestCase):
 
             saved_manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(saved_manifest["width"], 800)
-            self.assertEqual(saved_manifest["height"], 480)
+            self.assertEqual(saved_manifest["height"], 432)
+            self.assertEqual(saved_manifest["final_width"], 800)
+            self.assertEqual(saved_manifest["final_height"], 480)
+            self.assertEqual(saved_manifest["caption_height"], 48)
             self.assertEqual(saved_manifest["renders"][0]["side_caption"], "A warm red memory")
+            self.assertEqual(saved_manifest["renders"][0]["analysis_channel"], "local_lmstudio")
+            self.assertEqual(saved_manifest["renders"][0]["crop_focus"]["reason"], "主体")
+            self.assertEqual(saved_manifest["renders"][0]["location_hint"], "Shenzhen")
 
 
 if __name__ == "__main__":

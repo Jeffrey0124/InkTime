@@ -16,12 +16,15 @@ class ServerRoutesTests(unittest.TestCase):
             root = Path(tmp)
             render_dir = root / "renders"
             render_dir.mkdir()
-            Image.new("RGB", (800, 480), (255, 255, 255)).save(render_dir / "render_000.png")
+            Image.new("RGB", (800, 432), (255, 255, 255)).save(render_dir / "render_000.png")
             (render_dir / "manifest.json").write_text(
                 json.dumps(
                     {
                         "width": 800,
-                        "height": 480,
+                        "height": 432,
+                        "final_width": 800,
+                        "final_height": 480,
+                        "caption_height": 48,
                         "dither": "atkinson",
                         "renders": [
                             {
@@ -33,6 +36,10 @@ class ServerRoutesTests(unittest.TestCase):
                                 "beauty_score": 76.0,
                                 "exif_date": "2024-01-02",
                                 "exif_city": "Shenzhen",
+                                "location_hint": "KID Park",
+                                "analysis_channel": "local_lmstudio",
+                                "analysis_model": "google/gemma-4-31b-qat:2",
+                                "crop_focus": {"x": 0.2, "y": 0.3, "w": 0.4, "h": 0.5, "reason": "主体"},
                             }
                         ],
                     },
@@ -54,7 +61,8 @@ class ServerRoutesTests(unittest.TestCase):
                     reason TEXT,
                     exif_json TEXT,
                     side_caption TEXT,
-                    exif_city TEXT
+                    exif_city TEXT,
+                    location_hint TEXT
                 )
                 """
             )
@@ -85,6 +93,7 @@ class ServerRoutesTests(unittest.TestCase):
             self.assertIn("本地渲染画廊", html)
             self.assertIn("一段简短回忆", html)
             self.assertIn("render_000.png", html)
+            self.assertIn("local_lmstudio", html)
             self.assertIn('href="/renders/0"', html)
 
             detail = client.get("/renders/0")
@@ -94,6 +103,11 @@ class ServerRoutesTests(unittest.TestCase):
             self.assertIn("评分理由", detail_html)
             self.assertIn("更多信息", detail_html)
             self.assertIn("一段有用的画面描述", detail_html)
+            self.assertIn("google/gemma-4-31b-qat:2", detail_html)
+            self.assertIn("裁切关注区", detail_html)
+            self.assertIn("Shenzhen", detail_html)
+            self.assertIn("/static/location.svg", detail_html)
+            self.assertNotIn("KID Park", detail_html)
 
             image = client.get("/static/renders/render_000.png")
             self.assertEqual(image.status_code, 200)

@@ -41,7 +41,10 @@ def _load_manifest(render_output_dir: Path) -> dict[str, Any]:
     if not manifest_path.exists():
         return {
             "width": _config_value("RENDER_WIDTH", 800),
-            "height": _config_value("RENDER_HEIGHT", 480),
+            "height": _config_value("RENDER_HEIGHT", 432),
+            "final_width": _config_value("RENDER_WIDTH", 800),
+            "final_height": _config_value("FINAL_RENDER_HEIGHT", 480),
+            "caption_height": _config_value("CAPTION_BAR_HEIGHT", 48),
             "mode": _config_value("RENDER_MODE", "scale"),
             "dither": _config_value("DITHER_MODE", "atkinson"),
             "renders": [],
@@ -55,8 +58,21 @@ def _read_review_rows(db_path: Path, limit: int = 200) -> list[sqlite3.Row]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(photo_scores)").fetchall()
+        }
+        analysis_channel_expr = (
+            "analysis_channel" if "analysis_channel" in columns else "'' AS analysis_channel"
+        )
+        analysis_model_expr = (
+            "analysis_model" if "analysis_model" in columns else "'' AS analysis_model"
+        )
+        location_hint_expr = (
+            "location_hint" if "location_hint" in columns else "'' AS location_hint"
+        )
         return conn.execute(
-            """
+            f"""
             SELECT path,
                    caption,
                    type,
@@ -64,7 +80,10 @@ def _read_review_rows(db_path: Path, limit: int = 200) -> list[sqlite3.Row]:
                    beauty_score,
                    reason,
                    side_caption,
-                   exif_city
+                   exif_city,
+                   {location_hint_expr},
+                   {analysis_channel_expr},
+                   {analysis_model_expr}
             FROM photo_scores
             ORDER BY COALESCE(memory_score, -1) DESC,
                      COALESCE(beauty_score, -1) DESC,
@@ -114,6 +133,35 @@ def _type_pills(value: Any) -> str:
     if not labels:
         labels = ["未分类"]
     return "".join(f'<span class="pill">{_esc(label)}</span>' for label in labels[:4])
+
+
+def _channel_badge(value: Any) -> str:
+    channel = str(value or "").strip()
+    if not channel:
+        return ""
+    return f'<span class="chip">分析 {_esc(channel)}</span>'
+
+
+def _display_side_caption(item: dict[str, Any]) -> str:
+    side = str(item.get("side_caption") or "").strip()
+    if 4 <= len(side) <= 30 and "照片" not in side and "画面" not in side:
+        return side
+    caption = str(item.get("caption") or "")
+    ptype = str(item.get("type") or "")
+    combined = f"{ptype} {caption}"
+    if any(word in combined for word in ("孩子", "儿童", "小女孩", "小朋友")):
+        return "小手忙着搭一座新城"
+    if any(word in combined for word in ("猫", "宠物", "狗")):
+        return "它把日常占成了主角"
+    if any(word in combined for word in ("旅行", "风景", "山", "海", "湖")):
+        return "风景替脚步留了证词"
+    if any(word in combined for word in ("美食", "餐", "饭", "菜")):
+        return "胃先替记忆点了头"
+    return "日常在这里轻轻落座"
+
+
+def _display_location(item: dict[str, Any]) -> str:
+    return str(item.get("exif_city") or "").strip()
 
 
 def _page(title: str, body: str) -> str:
@@ -270,7 +318,7 @@ def _page(title: str, body: str) -> str:
     .thumb {{
       display: block;
       width: 100%;
-      aspect-ratio: 5 / 3;
+      aspect-ratio: 50 / 27;
       object-fit: contain;
       background: #f5f1e8;
       border-bottom: 1px solid var(--line-soft);
@@ -310,11 +358,14 @@ def _page(title: str, body: str) -> str:
     }}
     .detail-grid {{
       display: grid;
-      grid-template-columns: minmax(320px, 560px) minmax(320px, 1fr);
+      grid-template-columns: minmax(320px, 800px) minmax(320px, 1fr);
       gap: 26px;
       align-items: start;
     }}
     .preview-panel {{
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) 10%;
+      aspect-ratio: 5 / 3;
       overflow: hidden;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -324,6 +375,8 @@ def _page(title: str, body: str) -> str:
     .preview-panel img {{
       display: block;
       width: 100%;
+      height: 100%;
+      object-fit: contain;
       background: #f5f1e8;
     }}
     .paper-caption {{
@@ -333,6 +386,29 @@ def _page(title: str, body: str) -> str:
       font-size: 17px;
       line-height: 1.45;
       font-family: "KaiTi", "STKaiti", "Microsoft YaHei", serif;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      min-height: 0;
+      overflow: hidden;
+    }}
+    .paper-caption-text {{
+      min-width: 0;
+    }}
+    .paper-location {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #8a877f;
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }}
+    .paper-location img {{
+      display: block;
+      width: 20px;
+      height: 20px;
+      opacity: 0.75;
     }}
     .info-panel {{
       border: 1px solid var(--line);
@@ -340,6 +416,7 @@ def _page(title: str, body: str) -> str:
       background: var(--panel);
       box-shadow: var(--shadow);
       padding: clamp(18px, 3vw, 28px);
+      overflow: auto;
     }}
     .quote-title {{
       margin: 0 0 14px;
@@ -468,14 +545,38 @@ def _page(title: str, body: str) -> str:
     <nav><a href="/renders">渲染画廊</a><a href="/review">分析结果</a></nav>
   </header>
   <main>{body}</main>
+  <script>
+    (() => {{
+      const syncDetailPanels = () => {{
+        document.querySelectorAll(".detail-grid").forEach((grid) => {{
+          const preview = grid.querySelector(".preview-panel");
+          const info = grid.querySelector(".info-panel");
+          if (!preview || !info) return;
+          if (window.matchMedia("(max-width: 900px)").matches) {{
+            info.style.height = "";
+            return;
+          }}
+          info.style.height = `${{Math.round(preview.getBoundingClientRect().height)}}px`;
+        }});
+      }};
+      window.addEventListener("load", syncDetailPanels);
+      window.addEventListener("resize", syncDetailPanels);
+      if ("ResizeObserver" in window) {{
+        document.querySelectorAll(".preview-panel").forEach((panel) => {{
+          new ResizeObserver(syncDetailPanels).observe(panel);
+        }});
+      }}
+      syncDetailPanels();
+    }})();
+  </script>
 </body>
 </html>"""
 
 
 def _render_renders_page(manifest: dict[str, Any]) -> str:
     renders = manifest.get("renders", [])
-    width = manifest.get("width", 800)
-    height = manifest.get("height", 480)
+    width = manifest.get("final_width") or manifest.get("width", 800)
+    height = manifest.get("final_height") or manifest.get("height", 480)
     mode = manifest.get("mode", "scale")
     dither = manifest.get("dither", "atkinson")
     generated_at = manifest.get("generated_at", "")
@@ -506,15 +607,16 @@ def _render_renders_page(manifest: dict[str, Any]) -> str:
     body.append('<section class="gallery-grid">')
     for idx, item in enumerate(renders):
         render_png = str(item.get("render_png", ""))
-        side = str(item.get("side_caption") or item.get("caption") or "未命名照片")
+        side = _display_side_caption(item)
         caption = str(item.get("caption") or "")
         source_path = _short_path(item.get("source_path"))
-        city = str(item.get("exif_city") or "")
+        city = _display_location(item)
         date = str(item.get("exif_date") or "")
         type_text = str(item.get("type") or "未分类")
+        analysis_channel = str(item.get("analysis_channel") or "")
         memory = _fmt_score(item.get("memory_score"))
         beauty = _fmt_score(item.get("beauty_score"))
-        meta = " · ".join(part for part in [date, city, type_text] if part)
+        meta = " · ".join(part for part in [date, city, type_text, analysis_channel] if part)
         body.append(
             f"""
             <a class="render-card" href="/renders/{idx}">
@@ -539,12 +641,24 @@ def _render_renders_page(manifest: dict[str, Any]) -> str:
 def _render_detail_page(manifest: dict[str, Any], item: dict[str, Any], item_id: int) -> str:
     render_png = str(item.get("render_png", ""))
     render_bmp = str(item.get("render_bmp", ""))
-    side = str(item.get("side_caption") or item.get("caption") or "未命名照片")
+    side = _display_side_caption(item)
     caption = str(item.get("caption") or "")
     reason = str(item.get("reason") or "暂无评分理由。")
     source_path = str(item.get("source_path") or "")
-    width = manifest.get("width", 800)
-    height = manifest.get("height", 480)
+    analysis_channel = str(item.get("analysis_channel") or "")
+    analysis_model = str(item.get("analysis_model") or "")
+    crop_focus = item.get("crop_focus")
+    crop_focus_text = json.dumps(crop_focus, ensure_ascii=False) if crop_focus else "-"
+    location = _display_location(item)
+    location_html = (
+        f'<span class="paper-location"><img src="/static/location.svg" alt="" aria-hidden="true"><span>{_esc(location)}</span></span>'
+        if location
+        else ""
+    )
+    image_width = manifest.get("width", 800)
+    image_height = manifest.get("height", 432)
+    final_width = manifest.get("final_width") or image_width
+    final_height = manifest.get("final_height") or 480
     mode = manifest.get("mode", "scale")
     dither = manifest.get("dither", "atkinson")
     memory = item.get("memory_score")
@@ -552,10 +666,15 @@ def _render_detail_page(manifest: dict[str, Any], item: dict[str, Any], item_id:
     meta_rows = [
         ("原图路径", source_path),
         ("EXIF 日期", item.get("exif_date") or "-"),
-        ("城市", item.get("exif_city") or "-"),
+        ("城市/地点", _display_location(item) or "-"),
         ("渲染文件", render_png),
         ("BMP 文件", render_bmp or "-"),
-        ("渲染参数", f"{width}x{height} / {mode} / {dither}"),
+        ("最终尺寸", f"{final_width}x{final_height}（含文字条）"),
+        ("图像区", f"{image_width}x{image_height}"),
+        ("渲染参数", f"{mode} / {dither}"),
+        ("分析通道", analysis_channel or "-"),
+        ("分析模型", analysis_model or "-"),
+        ("裁切关注区", crop_focus_text),
     ]
     detail_items = "".join(
         f"<div><strong>{_esc(label)}：</strong>{_esc(value)}</div>" for label, value in meta_rows
@@ -574,11 +693,11 @@ def _render_detail_page(manifest: dict[str, Any], item: dict[str, Any], item_id:
     <section class="detail-grid">
       <div class="preview-panel">
         <img src="/static/renders/{_esc(render_png)}" alt="{_esc(render_png)}">
-        <div class="paper-caption">{_esc(side)}</div>
+        <div class="paper-caption"><span class="paper-caption-text">{_esc(side)}</span>{location_html}</div>
       </div>
       <aside class="info-panel">
         <h2 class="quote-title">「{_esc(side)}」</h2>
-        <div class="pills">{_type_pills(item.get("type"))}</div>
+        <div class="pills">{_type_pills(item.get("type"))}{_channel_badge(analysis_channel)}</div>
         <p class="description">{_esc(caption)}</p>
         <div class="score-row">
           <span class="muted">回忆度</span>
@@ -628,8 +747,9 @@ def _render_review_page(rows: list[sqlite3.Row]) -> str:
         caption = _esc(row["side_caption"] or row["caption"])
         details = _esc(row["reason"])
         source = _esc(row["path"])
+        channel = _esc(row["analysis_channel"])
         body.append(
-            f"<tr><td>{score}</td><td><strong>{caption}</strong><br><span class='small'>{details}</span></td><td class='small'>{source}</td></tr>"
+            f"<tr><td>{score}<br><span class='small'>{channel}</span></td><td><strong>{caption}</strong><br><span class='small'>{details}</span></td><td class='small'>{source}</td></tr>"
         )
     body.append("</tbody></table>")
     return "".join(body)
@@ -696,13 +816,16 @@ def create_app(
             output_dir=render_dir,
             limit=limit,
             width=int(request.args.get("width", _config_value("RENDER_WIDTH", 800))),
-            height=int(request.args.get("height", _config_value("RENDER_HEIGHT", 480))),
+            height=int(request.args.get("height", _config_value("RENDER_HEIGHT", 432))),
+            final_height=int(_config_value("FINAL_RENDER_HEIGHT", 480)),
+            caption_height=int(_config_value("CAPTION_BAR_HEIGHT", 48)),
             mode=str(request.args.get("mode", _config_value("RENDER_MODE", "scale"))),
             dither=str(request.args.get("dither", _config_value("DITHER_MODE", "atkinson"))),
             brightness=float(request.args.get("brightness", _config_value("BRIGHTNESS", 1.1))),
             contrast=float(request.args.get("contrast", _config_value("CONTRAST", 1.2))),
             saturation=float(request.args.get("saturation", _config_value("SATURATION", 1.2))),
             save_bmp=bool(_config_value("SAVE_BMP_OUTPUT", True)),
+            font_path=str(_config_value("FONT_PATH", "")),
         )
         return redirect(f"/renders/{item_id}")
 
