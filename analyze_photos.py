@@ -1347,7 +1347,7 @@ def main():
 
             bar_width = 30
             filled = int(bar_width * progress)
-            bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
+            bar = "#" * filled + "-" * (bar_width - filled)
 
             elapsed = time.time() - start_time
             avg_per = elapsed / idx if idx > 0 else 0
@@ -1395,7 +1395,7 @@ def main():
 
                     bar_width = 30
                     filled = int(bar_width * progress)
-                    bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
+                    bar = "#" * filled + "-" * (bar_width - filled)
 
                     elapsed = time.time() - start_time
                     avg_per = elapsed / done_so_far if done_so_far > 0 else 0
