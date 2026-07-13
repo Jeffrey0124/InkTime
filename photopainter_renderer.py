@@ -398,6 +398,27 @@ def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) 
     return int(box[2] - box[0]), int(box[3] - box[1])
 
 
+def _draw_location_pin(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    *,
+    size: int = 16,
+    fill: tuple[int, int, int] = (0, 0, 0),
+) -> None:
+    center_x = x + size // 2
+    circle_top = y + 1
+    circle_bottom = y + size - 6
+    circle_left = x + 3
+    circle_right = x + size - 3
+    point_y = y + size - 1
+
+    draw.ellipse((circle_left, circle_top, circle_right, circle_bottom), outline=fill, width=1)
+    draw.ellipse((center_x - 2, circle_top + 4, center_x + 2, circle_top + 8), outline=fill, width=1)
+    draw.line((circle_left + 1, circle_bottom - 2, center_x, point_y), fill=fill, width=1)
+    draw.line((circle_right - 1, circle_bottom - 2, center_x, point_y), fill=fill, width=1)
+
+
 def _fit_single_line(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -445,7 +466,7 @@ def _draw_info_bar(
     location_font = _load_text_font(font_path, max(18, int(bar_height * 0.34)))
     location_width = 0
     if location_text:
-        location_width = _text_size(draw, "◎ " + location_text, location_font)[0]
+        location_width = 16 + 6 + _text_size(draw, location_text, location_font)[0]
 
     gap = 20 if location_text else 0
     caption_max_width = max(80, width - margin * 2 - location_width - gap)
@@ -463,11 +484,13 @@ def _draw_info_bar(
     draw.text((margin, caption_y), caption, fill=(0, 0, 0), font=caption_font)
 
     if location_text:
-        loc = "◎ " + location_text
-        loc_width, loc_height = _text_size(draw, loc, location_font)
-        loc_x = width - margin - loc_width
+        loc_width, loc_height = _text_size(draw, location_text, location_font)
+        total_width = 16 + 6 + loc_width
+        icon_x = width - margin - total_width
         loc_y = bar_top + (bar_height - loc_height) // 2 - 2
-        draw.text((loc_x, loc_y), loc, fill=(120, 120, 120), font=location_font)
+        icon_y = bar_top + (bar_height - 16) // 2 - 1
+        _draw_location_pin(draw, icon_x, icon_y, size=16, fill=(120, 120, 120))
+        draw.text((icon_x + 22, loc_y), location_text, fill=(120, 120, 120), font=location_font)
 
     return output
 

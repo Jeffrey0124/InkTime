@@ -207,6 +207,123 @@ Get-Content -Raw -Encoding UTF8 README.md
 - 不要在最终回复里暴露 API key。
 - 项目说明和交付总结尽量给出可执行命令、具体路径和可验证结果。
 
+## 飞牛 NAS Docker 部署规范
+
+本仓库已经验证过飞牛 NAS Docker 部署，推荐形态固定为“一个镜像，两个常驻容器，一个按需 worker”：
+
+- `web`：运行 `python server.py`，提供 `/renders`、`/healthz`、`/push/latest.bmp`。
+- `scheduler`：运行 `python scheduler.py`，只负责定时自动推送。
+- `worker`：不常驻，只用于 `analyze_photos.py`、`render_photopainter.py` 和 `scheduler.py --run-once`。
+
+不要把 `web` 和 `scheduler` 合进一个容器；它们生命周期、日志和重启策略不同。也不要拆成多个镜像，当前项目一个镜像足够。
+
+### NAS 路径和卷
+
+当前飞牛实测路径：
+
+```text
+NAS IP: 192.168.31.115
+SSH 用户: susan
+部署目录: /vol1/1000/docker/InkTime-Photo/app
+数据目录: /vol1/1000/docker/InkTime-Photo/data
+照片目录: /vol1/1000/docker/InkTime-Photo/xiangce
+```
+
+Compose 卷约定必须保持：
+
+```text
+/photos                 # 只读挂载照片目录
+/data/photos.db         # SQLite 数据库
+/data/output/photopainter
+/data/output/push
+```
+
+照片目录必须只读挂载。不要把照片、`photos.db`、`output/`、本地 `config.py`、真实 `.env` 打进镜像或提交到 Git。
+
+### 配置和密钥
+
+容器使用 `docker/config.py`，构建时复制为 `/app/config.py`。容器配置必须从 `.env` / Docker 环境变量读取。
+
+`.env` 只放在 NAS，不提交仓库。真实云端 API key、`INKTIME_PUSH_API_TOKEN` 只能写入 NAS `.env`，不要出现在 README、测试、提交信息或最终回复里。
+
+本地模型双通道规则：
+
+- NAS 容器访问用户电脑上的 LM Studio 时，不能写 `127.0.0.1`。
+- 当前电脑 IP 是 `192.168.31.13`，容器配置应使用 `http://192.168.31.13:9100/v1/chat/completions`。
+- 当前实测从 NAS 访问该地址会超时，原因通常是 LM Studio 只监听本机或 Windows 防火墙拦截。
+- 保持通道顺序：`local_lmstudio` 优先，失败/超时/坏 JSON 自动 fallback 到 `cloud_qwen`。
+- 部署验证阶段可把 `LOCAL_VLM_TIMEOUT` 临时调小到 `8` 秒；局域网模型修好后再调回 `60` 秒。
+
+### 镜像构建经验
+
+飞牛默认 Docker Hub 代理曾对 `python:3.12-slim` 返回 `401 Unauthorized`，不要默认依赖 Docker Hub 官方 `python` 镜像。
+
+已验证可用基础镜像：
+
+```dockerfile
+FROM quay.io/fedora/python-312:latest
+```
+
+不要在镜像构建时依赖 `apt` 或 `dnf` 安装中文字体；NAS 网络慢且容易卡住。当前做法是把 `docker/fonts/NotoSansSC-VF.ttf` 随项目复制进镜像：
+
+```text
+/usr/local/share/fonts/NotoSansSC-VF.ttf
+```
+
+`docker/config.py` 的 `FONT_PATH` 应默认指向这个文件。
+
+### 远程部署操作规范
+
+飞牛上 `susan` 用户可 SSH 执行命令，但直接访问 Docker socket 会 permission denied；Docker 命令需要 `sudo`。
+
+部署时建议流程：
+
+```bash
+cd /vol1/1000/docker/InkTime-Photo/app
+sudo docker compose build
+sudo docker compose up -d web scheduler
+sudo docker compose ps
+sudo docker compose logs --tail=100 web scheduler
+```
+
+按需任务：
+
+```bash
+sudo docker compose run --rm worker analyze_photos.py -j 1 --debug
+sudo docker compose run --rm worker render_photopainter.py
+sudo docker compose run --rm worker scheduler.py --run-once --slot 07:00
+```
+
+远程上传时先打包项目，排除 `.git/`、`.env`、`config.py`、`photos.db`、`output/`、`sample_photos/` 和临时日志。上传到 NAS 后再在 NAS 的 `app/.env` 写真实配置。
+
+如果远程输出含 Docker Compose 的彩色符号，Windows GBK 控制台可能报编码错误；部署脚本输出要做安全编码，或减少实时打印复杂 Unicode。
+
+### 验收标准
+
+部署后必须验证：
+
+```text
+http://192.168.31.115:8766/healthz
+http://192.168.31.115:8766/renders
+http://192.168.31.115:8766/push/latest.png
+http://192.168.31.115:8766/push/latest.bmp
+http://192.168.31.115:8766/push/manifest.json
+```
+
+`latest.bmp` 必须满足：
+
+- `800x480`
+- `RGB`
+- 只包含 PhotoPainter 六色调色板
+- manifest 的 `image_url` 是 `/push/latest.bmp`
+
+当前首次 NAS 验证结果：
+
+- 3 张 JPG 测试照片分析成功。
+- 因本地 LM Studio 从 NAS 不可达，实际分析通道为 `cloud_qwen`。
+- `web` healthy，`scheduler` 正常注册 `07:00 / 12:00 / 18:40`。
+- `/push/latest.bmp` 返回 200，文件为 `800x480` RGB 六色 BMP。
+
 ## CodeGraph
 
 如果仓库根目录存在 `.codegraph/`，理解代码前先用 CodeGraph；如果不存在，直接使用 `rg` 和常规文件阅读即可。

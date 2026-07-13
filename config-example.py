@@ -72,3 +72,10 @@ FONT_PATH = ""
 
 # 每次渲染到本地画廊的照片数量。
 DAILY_PHOTO_QUANTITY = 5
+
+# 墨水屏自动推送。设备固定读取 /push/latest.bmp；PNG 仅用于浏览器调试。
+PUSH_OUTPUT_DIR = "./output/push"
+PUSH_API_TOKEN = os.environ.get("INKTIME_PUSH_API_TOKEN", "")
+PUSH_SCHEDULES = ["07:00", "12:00", "18:40"]
+PUSH_EXCLUDE_DAYS = 90
+PUSH_TIMEZONE = "Asia/Shanghai"

@@ -1,0 +1,45 @@
+services:
+  web:
+    build: .
+    image: inktime-photopainter-local:latest
+    container_name: inktime-web
+    command: ["python", "server.py"]
+    env_file:
+      - .env
+    ports:
+      - "${FLASK_PORT:-8766}:8766"
+    volumes:
+      - "${PHOTO_DIR:?请在 .env 中设置 PHOTO_DIR}:/photos:ro"
+      - "${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/data"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  scheduler:
+    build: .
+    image: inktime-photopainter-local:latest
+    container_name: inktime-scheduler
+    command: ["python", "scheduler.py"]
+    env_file:
+      - .env
+    volumes:
+      - "${PHOTO_DIR:?请在 .env 中设置 PHOTO_DIR}:/photos:ro"
+      - "${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/data"
+    restart: unless-stopped
+
+  worker:
+    build: .
+    image: inktime-photopainter-local:latest
+    profiles:
+      - tools
+    env_file:
+      - .env
+    volumes:
+      - "${PHOTO_DIR:?请在 .env 中设置 PHOTO_DIR}:/photos:ro"
+      - "${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/data"
+    entrypoint: ["python"]
+    command: ["--version"]

@@ -128,6 +128,48 @@ output/photopainter/
 - `manifest.json`
 - 可选 `render_000.bmp`, `latest.bmp`
 
+## 自动推送
+
+推送给墨水屏设备的成品图固定为 BMP：
+
+- 设备下载：`http://127.0.0.1:8766/push/latest.bmp`
+- 浏览器预览：`http://127.0.0.1:8766/push/latest.png`
+- 发布状态：`http://127.0.0.1:8766/push/manifest.json`
+
+在 `/renders/<id>` 详情页点击“手动推送”会生成完整 `800x480` 成品图，其中上方图像区 `800x432`，底部文字条 `48px`、字号 `17px`。如果设置了 `PUSH_API_TOKEN`，手动推送需要输入 token；设备下载 BMP 不需要鉴权。
+
+自动推送使用独立进程，便于未来 Docker 拆分为 `web` 和 `scheduler`：
+
+```powershell
+python scheduler.py
+python scheduler.py --run-once --slot 07:00
+```
+
+详细设计见 `docs/push-strategy.md`。
+
+## 飞牛 NAS Docker 部署
+
+推荐使用 Docker Compose 的双容器形态：
+
+- `web`：运行 `python server.py`，提供 WebUI 和 `/push/latest.bmp`。
+- `scheduler`：运行 `python scheduler.py`，负责定时自动推送。
+- `worker`：不常驻，只用于按需执行分析、渲染和单次推送测试。
+
+快速命令：
+
+```bash
+cp .env.example .env
+docker compose build
+docker compose up -d web scheduler
+docker compose run --rm worker analyze_photos.py -j 1 --debug
+docker compose run --rm worker render_photopainter.py
+docker compose run --rm worker scheduler.py --run-once --slot 07:00
+```
+
+NAS 容器内不能用 `127.0.0.1` 访问你电脑上的 LM Studio。本地模型地址请在 `.env` 里改成电脑的局域网固定 IP，例如 `http://192.168.1.50:9100/v1/chat/completions`。
+
+完整部署说明见 `docs/docker-deployment.md`。
+
 ## 测试
 
 ```powershell

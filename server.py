@@ -12,8 +12,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, abort, redirect, request, send_file
+from flask import Flask, abort, jsonify, redirect, request, send_file
 
+from push_manager import PushSettings, ensure_push_schema, publish_render
 from render_photopainter import render_from_database
 
 
@@ -559,6 +560,27 @@ def _page(title: str, body: str) -> str:
           info.style.height = `${{Math.round(preview.getBoundingClientRect().height)}}px`;
         }});
       }};
+      window.pushRender = async (renderId) => {{
+        const headers = {{}};
+        const savedToken = sessionStorage.getItem("inktimePushToken");
+        if (savedToken) headers["X-Push-Token"] = savedToken;
+        let response = await fetch(`/api/push/manual/${{renderId}}`, {{ method: "POST", headers }});
+        if (response.status === 401) {{
+          const token = window.prompt("请输入推送 token");
+          if (!token) return;
+          sessionStorage.setItem("inktimePushToken", token);
+          response = await fetch(`/api/push/manual/${{renderId}}`, {{
+            method: "POST",
+            headers: {{ "X-Push-Token": token }}
+          }});
+        }}
+        const data = await response.json().catch(() => ({{ ok: false, error: "响应解析失败" }}));
+        if (!response.ok || !data.ok) {{
+          window.alert(`推送失败：${{data.error || response.statusText}}`);
+          return;
+        }}
+        window.alert(`已推送，墨水屏可下载 ${{data.image_url}}\\n浏览器预览 ${{data.preview_url}}`);
+      }};
       window.addEventListener("load", syncDetailPanels);
       window.addEventListener("resize", syncDetailPanels);
       if ("ResizeObserver" in window) {{
@@ -720,6 +742,7 @@ def _render_detail_page(manifest: dict[str, Any], item: dict[str, Any], item_id:
         <div class="actions">
           <a class="button" href="/source/{item_id}">查看原图</a>
           <a class="button" href="/static/renders/{_esc(render_png)}">打开 PNG</a>
+          <button class="button" type="button" onclick="pushRender({item_id})">手动推送</button>
         </div>
       </aside>
     </section>
@@ -765,10 +788,16 @@ def create_app(
     render_dir = _resolve_path(
         render_output_dir or _config_value("RENDER_OUTPUT_DIR", "./output/photopainter")
     )
+    push_dir = _resolve_path(_config_value("PUSH_OUTPUT_DIR", "./output/push"))
+    ensure_push_schema(db)
 
     @app.get("/")
     def index():
         return redirect("/renders")
+
+    @app.get("/healthz")
+    def healthz():
+        return jsonify({"ok": True})
 
     @app.get("/renders")
     def renders():
@@ -792,6 +821,18 @@ def create_app(
     def render_static(filename: str):
         target = (render_dir / filename).resolve()
         if render_dir not in target.parents and target != render_dir:
+            abort(404)
+        if not target.exists() or not target.is_file():
+            abort(404)
+        return send_file(target)
+
+    @app.get("/push/<path:filename>")
+    def push_static(filename: str):
+        allowed = {"latest.bmp", "latest.png", "manifest.json"}
+        if filename not in allowed:
+            abort(404)
+        target = (push_dir / filename).resolve()
+        if push_dir not in target.parents and target != push_dir:
             abort(404)
         if not target.exists() or not target.is_file():
             abort(404)
@@ -828,6 +869,42 @@ def create_app(
             font_path=str(_config_value("FONT_PATH", "")),
         )
         return redirect(f"/renders/{item_id}")
+
+    @app.post("/api/push/manual/<int:item_id>")
+    def push_manual(item_id: int):
+        token = str(_config_value("PUSH_API_TOKEN", "") or "")
+        if token and request.headers.get("X-Push-Token", "") != token:
+            return jsonify({"ok": False, "error": "推送 token 错误或缺失"}), 401
+        settings = PushSettings(
+            db_path=db,
+            render_output_dir=render_dir,
+            push_output_dir=push_dir,
+            width=int(_config_value("RENDER_WIDTH", 800)),
+            image_height=int(_config_value("RENDER_HEIGHT", 432)),
+            final_height=int(_config_value("FINAL_RENDER_HEIGHT", 480)),
+            caption_height=int(_config_value("CAPTION_BAR_HEIGHT", 48)),
+            mode=str(_config_value("RENDER_MODE", "scale")),
+            dither=str(_config_value("DITHER_MODE", "atkinson")),
+            brightness=float(_config_value("BRIGHTNESS", 1.1)),
+            contrast=float(_config_value("CONTRAST", 1.2)),
+            saturation=float(_config_value("SATURATION", 1.2)),
+            font_path=str(_config_value("FONT_PATH", "")) or None,
+            timezone=str(_config_value("PUSH_TIMEZONE", "Asia/Shanghai")),
+            exclude_days=int(_config_value("PUSH_EXCLUDE_DAYS", 90)),
+        )
+        try:
+            manifest = publish_render(
+                item_id,
+                settings=settings,
+                trigger_type="manual",
+            )
+        except IndexError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except FileNotFoundError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"BMP 生成失败：{exc}"}), 500
+        return jsonify({"ok": True, **manifest})
 
     return app
 
