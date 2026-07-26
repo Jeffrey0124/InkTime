@@ -1,0 +1,199 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-26T00:00:00+08:00",
+  "title": "Design System: InkTime PhotoPainter Local",
+  "extensions": {
+    "colorMeta": {
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink Black",
+        "canonical": "#151813",
+        "tonalRamp": ["#151813", "#252a23", "#3a4238", "#596155", "#7c8578", "#a4ada0", "#d3dacd", "#f3f6ef"]
+      },
+      "page": {
+        "role": "neutral",
+        "displayName": "Paper Page",
+        "canonical": "#f7f8f4",
+        "tonalRamp": ["#1b1d18", "#353831", "#555a50", "#7a8174", "#a2aa9b", "#c9d0c1", "#e8ece2", "#f7f8f4"]
+      },
+      "green": {
+        "role": "primary",
+        "displayName": "Archive Green",
+        "canonical": "#26a96c",
+        "tonalRamp": ["#062215", "#0b3e27", "#11623e", "#1b8757", "#26a96c", "#5cc78f", "#a2e0bd", "#e0f7e9"]
+      },
+      "green-dark": {
+        "role": "primary",
+        "displayName": "Deep Archive Green",
+        "canonical": "#147448",
+        "tonalRamp": ["#03170d", "#082b1a", "#0d432a", "#125d3a", "#147448", "#2c9863", "#76c89b", "#d6f3e3"]
+      },
+      "push-red": {
+        "role": "tertiary",
+        "displayName": "Push Red",
+        "canonical": "#e72f4c",
+        "tonalRamp": ["#2b050b", "#560b18", "#861326", "#b91f37", "#e72f4c", "#f26b7c", "#f8a8b3", "#fde3e7"]
+      },
+      "blue": {
+        "role": "secondary",
+        "displayName": "Device Blue",
+        "canonical": "#2477d4",
+        "tonalRamp": ["#06172b", "#0b2d52", "#10477f", "#1862ad", "#2477d4", "#5fa0e6", "#a9cff4", "#e5f1ff"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Hero title and page-defining Chinese statements only."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Dense but readable operational text, logs, controls, and metadata."
+      },
+      "script": {
+        "displayName": "Script Accent",
+        "purpose": "Warmth Archive brand accent only, never primary functional copy."
+      }
+    },
+    "shadows": [
+      {
+        "name": "panel-shadow",
+        "value": "0 18px 44px rgba(39, 48, 42, 0.11)",
+        "purpose": "Default elevation for cards and panels."
+      },
+      {
+        "name": "deep-shadow",
+        "value": "0 28px 80px rgba(39, 48, 42, 0.18)",
+        "purpose": "Large preview surfaces and score badges."
+      },
+      {
+        "name": "push-shadow",
+        "value": "0 12px 28px rgba(231, 47, 76, .28)",
+        "purpose": "Floating push action affordance."
+      }
+    ],
+    "motion": [
+      {
+        "name": "hover-reveal",
+        "value": "opacity .18s ease, transform .18s ease, box-shadow .18s ease",
+        "purpose": "Reveal contextual actions on photo cards without permanently covering photos."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "wide-to-compact-rail",
+        "value": "1180px"
+      },
+      {
+        "name": "mobile-stack",
+        "value": "760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main workflow command such as starting analysis or pushing the current render.",
+      "html": "<button class=\"ds-btn-primary\">开始 / 暂停分析</button>",
+      "css": ".ds-btn-primary { min-height: 40px; border: 0; border-radius: 10px; padding: 9px 14px; background: #26a96c; color: #fff; font: 760 14px/1.55 \"Segoe UI\", \"Microsoft YaHei\", Arial, sans-serif; box-shadow: 0 8px 18px rgba(38, 169, 108, .22); transition: box-shadow .18s ease, transform .18s ease; } .ds-btn-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 24px rgba(38, 169, 108, .28); } .ds-btn-primary:focus-visible { outline: 3px solid rgba(38, 169, 108, .35); outline-offset: 2px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Secondary action for scan, refresh, settings, and navigation.",
+      "html": "<button class=\"ds-btn-ghost\">刷新候选</button>",
+      "css": ".ds-btn-ghost { min-height: 40px; border: 0; border-radius: 10px; padding: 9px 14px; background: #fff; color: #151813; font: 760 14px/1.55 \"Segoe UI\", \"Microsoft YaHei\", Arial, sans-serif; box-shadow: inset 0 0 0 1px #dfe4dc; transition: box-shadow .18s ease; } .ds-btn-ghost:hover { box-shadow: inset 0 0 0 1px #cbd3c7, 0 18px 44px rgba(39, 48, 42, 0.11); } .ds-btn-ghost:focus-visible { outline: 3px solid rgba(38, 169, 108, .3); outline-offset: 2px; }"
+    },
+    {
+      "name": "Push Float Button",
+      "kind": "button",
+      "refersTo": "button-push-float",
+      "description": "Contextual photo-card action that appears on hover or keyboard focus.",
+      "html": "<button class=\"ds-push-float\">加入推送 ↗</button>",
+      "css": ".ds-push-float { min-height: 40px; border: 0; border-radius: 999px; padding: 9px 16px; background: #e72f4c; color: #fff; font: 850 14px/1.55 \"Segoe UI\", \"Microsoft YaHei\", Arial, sans-serif; box-shadow: 0 12px 28px rgba(231, 47, 76, .28); transition: transform .18s ease, box-shadow .18s ease; } .ds-push-float:hover { transform: translateY(-1px); box-shadow: 0 16px 36px rgba(231, 47, 76, .34); } .ds-push-float:focus-visible { outline: 3px solid rgba(231, 47, 76, .32); outline-offset: 2px; }"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip-status",
+      "description": "Compact state label for analysis availability, model status, and schedule state.",
+      "html": "<span class=\"ds-chip-status\">分析完成</span>",
+      "css": ".ds-chip-status { display: inline-flex; align-items: center; min-height: 30px; padding: 6px 10px; border-radius: 999px; background: #dcf5e8; color: #147448; font: 800 12px/1.55 \"Segoe UI\", \"Microsoft YaHei\", Arial, sans-serif; white-space: nowrap; }"
+    },
+    {
+      "name": "Photo Card",
+      "kind": "card",
+      "refersTo": "card-photo",
+      "description": "Gallery item with real photo first, compact caption metadata, and circular score badge.",
+      "html": "<article class=\"ds-photo-card\"><img src=\"\" alt=\"\"><div class=\"ds-score\"><span>184.1</span><small>综合分</small></div><div class=\"ds-photo-copy\"><h3>小孩倒立才是真正的行走说明书</h3><p>长征镇 · 2026-04-26 · 孩子/家庭</p></div></article>",
+      "css": ".ds-photo-card { position: relative; overflow: hidden; border-radius: 14px; background: #fff; color: #151813; box-shadow: 0 18px 44px rgba(39, 48, 42, 0.11); font-family: \"Segoe UI\", \"Microsoft YaHei\", Arial, sans-serif; } .ds-photo-card img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #eef1ec; } .ds-photo-copy { position: relative; padding: 15px 16px 17px; } .ds-photo-copy h3 { max-width: calc(100% - 70px); margin: 0 0 8px; font-size: 17px; line-height: 1.25; } .ds-photo-copy p { margin: 0; color: #68716a; font-size: 14px; } .ds-score { position: absolute; right: 14px; bottom: 56px; width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; align-content: center; background: #161b15; color: white; box-shadow: 0 28px 80px rgba(39, 48, 42, 0.18); } .ds-score span { font-size: 17px; font-weight: 900; line-height: 1; } .ds-score small { font-size: 10px; color: #d3ddd0; }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input-text",
+      "description": "Configuration, numeric selection, and caption editing field language.",
+      "html": "<input class=\"ds-input\" value=\"20\" aria-label=\"选择数量\">",
+      "css": ".ds-input { min-height: 38px; border: 1px solid #cbd3c7; border-radius: 10px; background: #fff; color: #151813; padding: 7px 10px; font: 14px/1.55 \"Segoe UI\", \"Microsoft YaHei\", Arial, sans-serif; } .ds-input:focus-visible { outline: 3px solid rgba(38, 169, 108, .25); border-color: #26a96c; }"
+    },
+    {
+      "name": "Side Navigation Item",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "Deep rail navigation with compact icon and active warm-white surface.",
+      "html": "<a class=\"ds-nav-item ds-nav-item-active\" href=\"#gallery\"><span>▦</span><span>画廊</span></a>",
+      "css": ".ds-nav-item { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 9px 10px; border-radius: 10px; background: transparent; color: #cfd8cd; font: 14px/1.55 \"Segoe UI\", \"Microsoft YaHei\", Arial, sans-serif; text-decoration: none; } .ds-nav-item:hover, .ds-nav-item-active { background: #f8faf5; color: #162018; } .ds-nav-item:focus-visible { outline: 3px solid rgba(248, 250, 245, .35); outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Warmth Archive Operations Desk",
+    "overview": "InkTime PhotoPainter Local 的界面是一张安静的照片工作台：它有家庭照片的温度，也有本地工具应有的秩序。设计不复制传统 Windows 桌面应用，也不把自己包装成营销页；它让用户快速知道系统状态、浏览已分析照片、进入单张推送工作台，并确信预览会接近设备最终成品。\n\n视觉系统使用浅色矿物纸面、深墨绿色侧栏、强黑中文标题和少量 PhotoPainter 六色点缀。照片是主角，控件退到恰好可用的位置；危险或强动作才使用高饱和红色，日常成功和主流程使用绿色。",
+    "keyCharacteristics": [
+      "照片优先的操作界面，而不是功能按钮堆叠。",
+      "浅色纸面与深色侧栏形成稳定工作区。",
+      "中文大标题有记忆感，工具控件保持清楚紧凑。",
+      "设备输出、AI 状态和人工覆盖都必须可追溯。"
+    ],
+    "rules": [
+      {
+        "name": "The Photo-First Accent Rule",
+        "body": "红色推送按钮默认不压在照片上，只有悬停或键盘聚焦时出现。",
+        "section": "colors"
+      },
+      {
+        "name": "The Green Is Work Rule",
+        "body": "绿色用于主流程、可用和成功，不用于装饰性大面积铺色。",
+        "section": "colors"
+      },
+      {
+        "name": "The Chinese Leads Rule",
+        "body": "功能、状态和操作使用中文优先；英文只做辅助气质和分区节奏。",
+        "section": "typography"
+      },
+      {
+        "name": "The Shadow Has a Job Rule",
+        "body": "阴影只表示层级、状态或可操作性；不能用来给空白区域制造装饰。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do 让照片卡片中的照片占据主要视觉面积，控件只在需要时出现。",
+      "Do 把扫描、分析、生成预览等系统级动作放在状态中控台，不在画廊重复。",
+      "Do 把批量选择默认数量放在设置页，画廊只在进入选择模式后展开批量操作。",
+      "Do 使用真实照片或真实渲染结果作为主要视觉资产。",
+      "Do 保持配置页、画廊和推送工作台为独立页面。",
+      "Do 在桌面端优先考虑鼠标拖动、滚轮缩放和精确参数输入。"
+    ],
+    "donts": [
+      "Don't 复制传统 Windows 桌面程序的密集按钮矩阵和厚重灰色面板。",
+      "Don't 把配置页混在其他页面底部。",
+      "Don't 在画廊里长期显示满屏红色推送按钮。",
+      "Don't 在画廊首屏常驻“全选当前筛选 / 选择前 N 张”这类批量控制。",
+      "Don't 用独立阈值输入干扰随机发现；随机候选遵循推送选片规则和 60 分以上口径。",
+      "Don't 编造设备能力、公网能力、用户证明或 API key 状态。"
+    ]
+  }
+}
