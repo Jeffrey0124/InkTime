@@ -256,8 +256,12 @@ https://www.geonames.org/
 
 ## ⭐ Star History
 
-<p align="center">
-  <a href="https://star-history.com/#dai-hongtao/InkTime&Timeline">
-    <img src="https://api.star-history.com/svg?repos=dai-hongtao/InkTime&type=Timeline" width="700"/>
-  </a>
-</p>
+## Star History
+
+<a href="https://www.star-history.com/?type=timeline&repos=dai-hongtao%2FInkTime">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&theme=dark&legend=top-left&sealed_token=KDuw0-4FeyoXi-kNs2UZMJMQAvvd5MpJrbTQOtnAClcyvPyAvQCS1S_s4qGWHlhH40jH9gJOAHGamztvEmzOvmRW6G9zADU5jJCrnKzslBTlVVX0ZZuqtKOMe7oqM5dQrURX_OSeLJw12d2FE2Lq4BuHLn4TdLop-I4PgvkNUyljihZNl9Ep3QGxwlPF" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&legend=top-left&sealed_token=KDuw0-4FeyoXi-kNs2UZMJMQAvvd5MpJrbTQOtnAClcyvPyAvQCS1S_s4qGWHlhH40jH9gJOAHGamztvEmzOvmRW6G9zADU5jJCrnKzslBTlVVX0ZZuqtKOMe7oqM5dQrURX_OSeLJw12d2FE2Lq4BuHLn4TdLop-I4PgvkNUyljihZNl9Ep3QGxwlPF" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&legend=top-left&sealed_token=KDuw0-4FeyoXi-kNs2UZMJMQAvvd5MpJrbTQOtnAClcyvPyAvQCS1S_s4qGWHlhH40jH9gJOAHGamztvEmzOvmRW6G9zADU5jJCrnKzslBTlVVX0ZZuqtKOMe7oqM5dQrURX_OSeLJw12d2FE2Lq4BuHLn4TdLop-I4PgvkNUyljihZNl9Ep3QGxwlPF" />
+ </picture>
+</a>
