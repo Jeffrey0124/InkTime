@@ -254,14 +254,12 @@ SW3 / SW4: 备用 GPIO，以防未来需要添加的功能。如无需要，可�
 GeoNames © GeoNames contributors, CC BY 4.0  
 https://www.geonames.org/
 
-## ⭐ Star History
-
 ## Star History
 
-<a href="https://www.star-history.com/?type=timeline&repos=dai-hongtao%2FInkTime">
+<a href="https://www.star-history.com/?repos=dai-hongtao%2FInkTime&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&theme=dark&legend=top-left&sealed_token=KDuw0-4FeyoXi-kNs2UZMJMQAvvd5MpJrbTQOtnAClcyvPyAvQCS1S_s4qGWHlhH40jH9gJOAHGamztvEmzOvmRW6G9zADU5jJCrnKzslBTlVVX0ZZuqtKOMe7oqM5dQrURX_OSeLJw12d2FE2Lq4BuHLn4TdLop-I4PgvkNUyljihZNl9Ep3QGxwlPF" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&legend=top-left&sealed_token=KDuw0-4FeyoXi-kNs2UZMJMQAvvd5MpJrbTQOtnAClcyvPyAvQCS1S_s4qGWHlhH40jH9gJOAHGamztvEmzOvmRW6G9zADU5jJCrnKzslBTlVVX0ZZuqtKOMe7oqM5dQrURX_OSeLJw12d2FE2Lq4BuHLn4TdLop-I4PgvkNUyljihZNl9Ep3QGxwlPF" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&legend=top-left&sealed_token=KDuw0-4FeyoXi-kNs2UZMJMQAvvd5MpJrbTQOtnAClcyvPyAvQCS1S_s4qGWHlhH40jH9gJOAHGamztvEmzOvmRW6G9zADU5jJCrnKzslBTlVVX0ZZuqtKOMe7oqM5dQrURX_OSeLJw12d2FE2Lq4BuHLn4TdLop-I4PgvkNUyljihZNl9Ep3QGxwlPF" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&theme=dark&legend=top-left&sealed_token=HAI4jmHzHVGv8Uh0H_8VWsV5YN3XWswbvR7vPn2uIU6XrZ5W-5rk1eIRv89n40g4u7dMavrdOkLqmVFXdZ0km-oO5vbUivWBRMph0-5SwHSSRLgU3fNSy-4bsdH_PAxghBvJtfdiuGi-xLOf6gAkRMPN2RBglC3yWuVznpKfeLMlDyEssMMMC_JWlc-Y" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&legend=top-left&sealed_token=HAI4jmHzHVGv8Uh0H_8VWsV5YN3XWswbvR7vPn2uIU6XrZ5W-5rk1eIRv89n40g4u7dMavrdOkLqmVFXdZ0km-oO5vbUivWBRMph0-5SwHSSRLgU3fNSy-4bsdH_PAxghBvJtfdiuGi-xLOf6gAkRMPN2RBglC3yWuVznpKfeLMlDyEssMMMC_JWlc-Y" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&legend=top-left&sealed_token=HAI4jmHzHVGv8Uh0H_8VWsV5YN3XWswbvR7vPn2uIU6XrZ5W-5rk1eIRv89n40g4u7dMavrdOkLqmVFXdZ0km-oO5vbUivWBRMph0-5SwHSSRLgU3fNSy-4bsdH_PAxghBvJtfdiuGi-xLOf6gAkRMPN2RBglC3yWuVznpKfeLMlDyEssMMMC_JWlc-Y" />
  </picture>
 </a>
