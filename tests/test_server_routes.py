@@ -116,8 +116,17 @@ class ServerRoutesTests(unittest.TestCase):
                 client = app.test_client()
 
                 home = client.get("/")
-                self.assertEqual(home.status_code, 302)
-                self.assertEqual(home.headers["Location"], "/renders")
+                self.assertEqual(home.status_code, 200)
+                self.assertIn("状态中控台", home.get_data(as_text=True))
+
+                status = client.get("/api/status")
+                self.assertEqual(status.status_code, 200)
+                status_payload = status.get_json()
+                self.assertTrue(status_payload["ok"])
+                self.assertEqual(status_payload["analyzed_photos"], 0)
+                self.assertEqual(status_payload["missing_photos"], 0)
+                self.assertIsNone(status_payload["recent_push"])
+                status.close()
 
                 health = client.get("/healthz")
                 self.assertEqual(health.status_code, 200)
@@ -166,10 +175,199 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertEqual(manifest.get_json()["image_url"], "/push/latest.bmp")
                 manifest.close()
 
+                status_after_push = client.get("/api/status")
+                self.assertEqual(status_after_push.status_code, 200)
+                self.assertIsNotNone(status_after_push.get_json()["recent_push"])
+                status_after_push.close()
+
                 image = client.get("/static/renders/render_000.png")
                 self.assertEqual(image.status_code, 200)
                 self.assertEqual(image.mimetype, "image/png")
                 image.close()
+            finally:
+                if original_config is not None:
+                    sys.modules["config"] = original_config
+                else:
+                    sys.modules.pop("config", None)
+                sys.modules.pop("server", None)
+                sys.modules.pop("push_manager", None)
+
+    def test_status_and_database_gallery_api(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            monitor_dir = root / "photos"
+            push_dir = root / "push"
+            monitor_dir.mkdir()
+            push_dir.mkdir()
+            source_path = monitor_dir / "warm.png"
+            missing_path = monitor_dir / "missing.png"
+            db_path = root / "photos.db"
+
+            Image.new("RGB", (320, 420), (80, 180, 120)).save(source_path)
+            Image.new("RGB", (800, 480), (255, 255, 255)).save(push_dir / "latest.png")
+            (push_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "image_url": "/push/latest.bmp",
+                        "preview_url": "/push/latest.png",
+                        "published_at": "2026-08-01T07:00:00+08:00",
+                        "trigger_type": "manual",
+                        "source_path": str(source_path),
+                        "side_caption": "春天在笑",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE photo_scores (
+                    path TEXT PRIMARY KEY,
+                    caption TEXT,
+                    type TEXT,
+                    memory_score REAL,
+                    beauty_score REAL,
+                    reason TEXT,
+                    exif_json TEXT,
+                    side_caption TEXT,
+                    exif_city TEXT,
+                    location_hint TEXT,
+                    analysis_channel TEXT,
+                    analysis_model TEXT,
+                    crop_focus_json TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO photo_scores
+                (path, caption, type, memory_score, beauty_score, reason, exif_json,
+                 side_caption, exif_city, location_hint, analysis_channel, analysis_model, crop_focus_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
+                       (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(source_path),
+                    "孩子在春天的草地上玩",
+                    "孩子/日常",
+                    81,
+                    72,
+                    "人物清楚，色彩温暖",
+                    json.dumps({"datetime": "2026:04:04 10:00:00"}, ensure_ascii=False),
+                    "春天在笑",
+                    "木渎镇",
+                    "木渎镇",
+                    "local_lmstudio",
+                    "google/gemma",
+                    "",
+                    str(missing_path),
+                    "一张已经不在磁盘上的照片",
+                    "日常",
+                    90,
+                    88,
+                    "历史记录应保留",
+                    json.dumps({"datetime": "2025:01:01 08:00:00"}, ensure_ascii=False),
+                    "旧照片仍留着",
+                    "苏州",
+                    "苏州",
+                    "cloud_qwen",
+                    "qwen3-vl-plus",
+                    "",
+                ),
+            )
+            conn.execute(
+                """
+                CREATE TABLE push_history (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  source_path TEXT NOT NULL,
+                  render_path TEXT NOT NULL,
+                  pushed_at TEXT NOT NULL,
+                  trigger_type TEXT NOT NULL,
+                  slot TEXT,
+                  exif_date TEXT,
+                  note TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO push_history
+                (source_path, render_path, pushed_at, trigger_type, slot, exif_date, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(source_path),
+                    str(push_dir / "latest.bmp"),
+                    "2026-08-01T07:00:00+08:00",
+                    "manual",
+                    "",
+                    "2026-04-04",
+                    "",
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            fake_config = types.ModuleType("config")
+            fake_config.DB_PATH = str(db_path)
+            fake_config.IMAGE_DIR = str(monitor_dir)
+            fake_config.RENDER_OUTPUT_DIR = str(root / "renders")
+            fake_config.PUSH_OUTPUT_DIR = str(push_dir)
+            fake_config.PUSH_API_TOKEN = "secret"
+            fake_config.FLASK_HOST = "127.0.0.1"
+            fake_config.FLASK_PORT = 8765
+
+            original_config = sys.modules.get("config")
+            sys.modules["config"] = fake_config
+            sys.modules.pop("server", None)
+            sys.modules.pop("push_manager", None)
+            try:
+                server = importlib.import_module("server")
+
+                app = server.create_app(db_path=db_path, render_output_dir=root / "renders")
+                client = app.test_client()
+
+                status = client.get("/api/status")
+                self.assertEqual(status.status_code, 200)
+                status_payload = status.get_json()
+                self.assertEqual(status_payload["monitored_files"], 1)
+                self.assertEqual(status_payload["analyzed_photos"], 2)
+                self.assertEqual(status_payload["missing_photos"], 1)
+                self.assertEqual(status_payload["recent_push"]["preview_url"], "/push/latest.png")
+                status.close()
+
+                photos = client.get("/api/photos")
+                self.assertEqual(photos.status_code, 200)
+                payload = photos.get_json()
+                self.assertEqual(len(payload["photos"]), 1)
+                photo = payload["photos"][0]
+                self.assertIsInstance(photo["photo_id"], int)
+                self.assertEqual(photo["side_caption"], "春天在笑")
+                self.assertEqual(photo["exif_date"], "2026-04-04")
+                self.assertEqual(photo["exif_city"], "木渎镇")
+                self.assertEqual(photo["score"], 153.0)
+                self.assertIn(f"/api/photos/{photo['photo_id']}/source", photo["source_url"])
+                photos.close()
+
+                with_missing = client.get("/api/photos?include_missing=1")
+                self.assertEqual(with_missing.status_code, 200)
+                self.assertEqual(len(with_missing.get_json()["photos"]), 2)
+                with_missing.close()
+
+                gallery = client.get("/gallery")
+                self.assertEqual(gallery.status_code, 200)
+                gallery_html = gallery.get_data(as_text=True)
+                self.assertIn("已分析照片瀑布流", gallery_html)
+                self.assertIn("春天在笑", gallery_html)
+                self.assertIn("加入推送", gallery_html)
+                self.assertIn(f"/photos/{photo['photo_id']}", gallery_html)
+
+                source = client.get(f"/api/photos/{photo['photo_id']}/source")
+                self.assertEqual(source.status_code, 200)
+                self.assertEqual(source.mimetype, "image/png")
+                source.close()
             finally:
                 if original_config is not None:
                     sys.modules["config"] = original_config

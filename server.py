@@ -17,6 +17,7 @@ from flask import Flask, abort, jsonify, redirect, request, send_file
 from photo_identity import ensure_photo_identity_schema
 from push_manager import PushSettings, ensure_push_schema, publish_render
 from render_photopainter import render_from_database
+from web_queries import load_photo, load_photos, load_status
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -175,20 +176,21 @@ def _page(title: str, body: str) -> str:
   <title>{html.escape(title)}</title>
   <style>
     :root {{
-      color-scheme: dark;
-      --page: #080b0f;
-      --panel: rgba(25, 28, 32, 0.92);
-      --panel-strong: rgba(31, 34, 39, 0.96);
-      --line: rgba(255, 255, 255, 0.13);
-      --line-soft: rgba(255, 255, 255, 0.08);
-      --text: #f3f4f1;
-      --muted: #a9afa9;
-      --subtle: #737a76;
+      color-scheme: light;
+      --page: #f7f8f4;
+      --panel: rgba(255, 255, 252, 0.94);
+      --panel-strong: rgba(255, 255, 252, 0.98);
+      --line: rgba(22, 34, 27, 0.13);
+      --line-soft: rgba(22, 34, 27, 0.08);
+      --text: #121711;
+      --muted: #667168;
+      --subtle: #8b938c;
       --mint: #8ff0c2;
       --gold: #ffd36e;
       --coral: #ff9a72;
       --blue: #7ab8ff;
-      --shadow: 0 20px 70px rgba(0, 0, 0, 0.35);
+      --green: #0b7d4b;
+      --shadow: 0 20px 70px rgba(31, 45, 36, 0.12);
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -197,8 +199,8 @@ def _page(title: str, body: str) -> str:
       font: 14px/1.65 "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
       color: var(--text);
       background:
-        linear-gradient(120deg, rgba(38, 50, 56, 0.28), transparent 38%),
-        linear-gradient(270deg, rgba(50, 70, 55, 0.18), transparent 42%),
+        linear-gradient(120deg, rgba(221, 244, 232, 0.8), transparent 36%),
+        linear-gradient(270deg, rgba(242, 226, 198, 0.48), transparent 42%),
         var(--page);
     }}
     a {{ color: inherit; text-decoration: none; }}
@@ -212,7 +214,7 @@ def _page(title: str, body: str) -> str:
       gap: 18px;
       padding: 16px clamp(18px, 4vw, 54px);
       border-bottom: 1px solid var(--line-soft);
-      background: rgba(8, 11, 15, 0.82);
+      background: rgba(247, 248, 244, 0.86);
       backdrop-filter: blur(18px);
     }}
     .brand {{
@@ -245,7 +247,7 @@ def _page(title: str, body: str) -> str:
       padding: 7px 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgba(255, 255, 255, 0.05);
+      background: rgba(255, 255, 255, 0.72);
       color: var(--text);
       font-weight: 650;
     }}
@@ -293,15 +295,15 @@ def _page(title: str, body: str) -> str:
       padding: 5px 10px;
       border: 1px solid var(--line);
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.72);
       color: var(--muted);
       font-size: 12px;
       white-space: nowrap;
     }}
     .pill {{
-      border-color: rgba(255, 154, 114, 0.35);
-      background: rgba(255, 154, 114, 0.12);
-      color: #ffd4c2;
+      border-color: rgba(11, 125, 75, 0.2);
+      background: rgba(11, 125, 75, 0.08);
+      color: var(--green);
     }}
     .gallery-grid {{
       display: grid;
@@ -357,6 +359,159 @@ def _page(title: str, body: str) -> str:
       border-radius: 8px;
       background: var(--panel);
       color: var(--muted);
+    }}
+    .dashboard-grid {{
+      display: grid;
+      grid-template-columns: minmax(360px, 1.15fr) minmax(320px, 0.85fr);
+      gap: 18px;
+      align-items: stretch;
+    }}
+    .status-panel, .metric-card, .photo-card {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }}
+    .status-panel {{
+      padding: clamp(22px, 3vw, 34px);
+    }}
+    .status-kicker {{
+      margin: 0 0 14px;
+      color: var(--green);
+      font-weight: 850;
+    }}
+    .status-title {{
+      margin: 0;
+      max-width: 780px;
+      font-size: clamp(28px, 4vw, 52px);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }}
+    .metric-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin: 18px 0;
+    }}
+    .metric-card {{
+      padding: 16px;
+      min-width: 0;
+    }}
+    .metric-card span {{
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .metric-card strong {{
+      display: block;
+      margin-top: 5px;
+      font-size: clamp(24px, 3vw, 38px);
+      line-height: 1;
+    }}
+    .dashboard-actions, .gallery-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }}
+    .latest-push {{
+      display: grid;
+      gap: 12px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }}
+    .latest-push img {{
+      width: 100%;
+      aspect-ratio: 5 / 3;
+      object-fit: contain;
+      border-radius: 8px;
+      background: #f5f1e8;
+      border: 1px solid var(--line-soft);
+    }}
+    .gallery-toolbar {{
+      justify-content: space-between;
+      margin: 0 0 18px;
+      padding: 14px 0;
+      border-top: 1px solid var(--line-soft);
+      border-bottom: 1px solid var(--line-soft);
+    }}
+    select {{
+      min-height: 38px;
+      padding: 7px 34px 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.82);
+      color: var(--text);
+      font: inherit;
+      font-weight: 650;
+    }}
+    .photo-masonry {{
+      columns: 3 280px;
+      column-gap: 18px;
+    }}
+    .photo-card {{
+      position: relative;
+      display: inline-block;
+      width: 100%;
+      overflow: hidden;
+      margin: 0 0 18px;
+      break-inside: avoid;
+    }}
+    .photo-card img {{
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #f5f1e8;
+    }}
+    .photo-card-copy {{
+      padding: 14px 15px 16px;
+    }}
+    .score-badge {{
+      position: absolute;
+      right: 12px;
+      bottom: 78px;
+      display: grid;
+      place-items: center;
+      min-width: 58px;
+      min-height: 58px;
+      padding: 8px;
+      border-radius: 999px;
+      background: #111711;
+      color: #fff;
+      font-weight: 900;
+      line-height: 1.05;
+      text-align: center;
+      box-shadow: 0 12px 30px rgba(17, 23, 17, 0.24);
+    }}
+    .score-badge small {{
+      display: block;
+      font-size: 10px;
+      font-weight: 700;
+      color: rgba(255,255,255,.75);
+    }}
+    .photo-card-actions {{
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      gap: 8px;
+      opacity: 0;
+      transform: translateY(-4px);
+      transition: opacity .16s ease, transform .16s ease;
+    }}
+    .photo-card:hover .photo-card-actions,
+    .photo-card:focus-within .photo-card-actions {{
+      opacity: 1;
+      transform: translateY(0);
+    }}
+    .primary-button {{
+      border-color: rgba(11, 125, 75, 0.2);
+      background: #22b573;
+      color: #fff;
+      box-shadow: 0 12px 28px rgba(34, 181, 115, 0.2);
     }}
     .detail-grid {{
       display: grid;
@@ -540,11 +695,11 @@ def _page(title: str, body: str) -> str:
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/renders">
+    <a class="brand" href="/">
       <strong>InkTime PhotoPainter</strong>
-      <span>本地六色墨水屏预览</span>
+      <span>照片瀑布流 | 批量预览 | 设备推送</span>
     </a>
-    <nav><a href="/renders">渲染画廊</a><a href="/review">分析结果</a></nav>
+    <nav><a href="/">中控台</a><a href="/gallery">画廊</a><a href="/renders">旧渲染</a><a href="/review">分析结果</a></nav>
   </header>
   <main>{body}</main>
   <script>
@@ -779,6 +934,225 @@ def _render_review_page(rows: list[sqlite3.Row]) -> str:
     return "".join(body)
 
 
+def _render_dashboard_page(status: dict[str, Any]) -> str:
+    recent_push = status.get("recent_push") or {}
+    preview_url = str(recent_push.get("preview_url") or "")
+    recent_time = str(recent_push.get("pushed_at") or "暂无推送")
+    recent_caption = str(recent_push.get("side_caption") or recent_push.get("source_path") or "还没有设备成品")
+    monitor_badge = "目录可用" if status.get("monitor_dir_exists") else "目录不可用"
+    push_panel = (
+        f"""
+        <aside class="latest-push">
+          <div>
+            <p class="status-kicker">Latest Push</p>
+            <h2>最近推送</h2>
+            <p class="muted">{_esc(recent_time)}</p>
+          </div>
+          <img src="{_esc(preview_url)}" alt="最近推送预览">
+          <p class="caption">{_esc(recent_caption)}</p>
+          <a class="button" href="/gallery">进入画廊</a>
+        </aside>
+        """
+        if preview_url
+        else f"""
+        <aside class="latest-push">
+          <div>
+            <p class="status-kicker">Latest Push</p>
+            <h2>最近推送</h2>
+            <p class="muted">{_esc(recent_time)}</p>
+          </div>
+          <div class="empty">暂无最近推送。先从画廊选择一张照片进入推送工作台。</div>
+          <a class="button" href="/gallery">进入画廊</a>
+        </aside>
+        """
+    )
+    return f"""
+    <section class="hero">
+      <div>
+        <p class="status-kicker">Warmth Archive</p>
+        <h1>收集散落的人间暖意，定格每一段时光</h1>
+        <p class="lead">状态中控台｜照片瀑布流｜批量预览｜设备推送</p>
+      </div>
+      <div class="stats">
+        <span class="chip">{_esc(monitor_badge)}</span>
+        <span class="chip">数据库 {_esc("可用" if status.get("health", {}).get("database_exists") else "未创建")}</span>
+      </div>
+    </section>
+    <section class="dashboard-grid">
+      <div>
+        <div class="status-panel">
+          <p class="status-kicker">Dashboard</p>
+          <h2 class="status-title">{_esc(status.get("analyzed_photos"))} 张照片已分析，画廊可以浏览</h2>
+          <p class="lead">监控目录：{_esc(status.get("monitor_dir"))}</p>
+        </div>
+        <div class="metric-grid">
+          <div class="metric-card"><span>监控照片</span><strong>{_esc(status.get("monitored_files"))}</strong></div>
+          <div class="metric-card"><span>已分析</span><strong>{_esc(status.get("analyzed_photos"))}</strong></div>
+          <div class="metric-card"><span>待分析估算</span><strong>{_esc(status.get("unanalyzed_estimate"))}</strong></div>
+          <div class="metric-card"><span>缺失标记</span><strong>{_esc(status.get("missing_photos"))}</strong></div>
+        </div>
+        <div class="dashboard-actions">
+          <a class="button primary-button" href="/gallery">打开画廊</a>
+          <a class="button" href="/renders">查看旧渲染成品</a>
+          <a class="button" href="/review">分析结果</a>
+        </div>
+      </div>
+      {push_panel}
+    </section>
+    """
+
+
+def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int) -> str:
+    sort_options = [
+        ("score", "综合分最高"),
+        ("date", "拍摄日期新到旧"),
+        ("rendered", "最近渲染"),
+        ("discovery", "推送选片规则"),
+    ]
+    options = "".join(
+        f'<option value="{_esc(value)}" {"selected" if value == sort else ""}>{_esc(label)}</option>'
+        for value, label in sort_options
+    )
+    cards: list[str] = []
+    for photo in photos:
+        score = _fmt_score(photo.get("score"))
+        meta = " · ".join(
+            part
+            for part in [
+                str(photo.get("exif_date") or ""),
+                str(photo.get("exif_city") or ""),
+                str(photo.get("type") or "未分类"),
+            ]
+            if part
+        )
+        cards.append(
+            f"""
+            <article class="photo-card" tabindex="0">
+              <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}" loading="lazy">
+              <div class="photo-card-actions">
+                <a class="button primary-button" href="/push-studio/{_esc(photo.get("photo_id"))}">加入推送 ↗</a>
+              </div>
+              <div class="score-badge">{_esc(score)}<small>综合分</small></div>
+              <div class="photo-card-copy">
+                <p class="caption">{_esc(photo.get("side_caption"))}</p>
+                <p class="small">{_esc(meta or "暂无日期/地点")}</p>
+                <p class="small"><a href="/photos/{_esc(photo.get("photo_id"))}">查看详情</a></p>
+              </div>
+            </article>
+            """
+        )
+    if not cards:
+        cards.append(
+            """
+            <div class="empty">
+              还没有可展示的已分析照片。可能是数据库为空、照片被标记 missing，或监控目录暂时不可读。
+            </div>
+            """
+        )
+    return f"""
+    <section class="hero">
+      <div>
+        <p class="status-kicker">Gallery</p>
+        <h1>已分析照片瀑布流</h1>
+        <p class="lead">从数据库读取已分析且仍存在于磁盘的照片，不再使用旧 manifest 下标作为身份。</p>
+      </div>
+      <div class="stats">
+        <span class="chip">{len(photos)} 张</span>
+        <span class="chip">最多 {limit} 张</span>
+      </div>
+    </section>
+    <form class="gallery-toolbar" method="get" action="/gallery">
+      <label class="small">排序
+        <select name="sort" onchange="this.form.submit()">{options}</select>
+      </label>
+      <div>
+        <input type="hidden" name="limit" value="{_esc(limit)}">
+        <button class="button" type="submit">刷新候选</button>
+      </div>
+    </form>
+    <section class="photo-masonry">{"".join(cards)}</section>
+    """
+
+
+def _render_photo_database_detail(photo: dict[str, Any]) -> str:
+    meta = " · ".join(
+        part
+        for part in [
+            str(photo.get("exif_date") or ""),
+            str(photo.get("exif_city") or ""),
+            str(photo.get("type") or "未分类"),
+            str(photo.get("analysis_channel") or ""),
+        ]
+        if part
+    )
+    return f"""
+    <section class="hero">
+      <div>
+        <p class="status-kicker">Photo #{_esc(photo.get("photo_id"))}</p>
+        <h1>{_esc(photo.get("side_caption") or "未命名照片")}</h1>
+        <p class="lead">{_esc(meta or "暂无日期/地点")}</p>
+      </div>
+      <div class="stats">
+        <a class="button" href="/gallery">返回画廊</a>
+        <a class="button primary-button" href="/push-studio/{_esc(photo.get("photo_id"))}">进入推送工作台</a>
+      </div>
+    </section>
+    <section class="detail-grid">
+      <div class="preview-panel">
+        <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
+        <div class="paper-caption"><span class="paper-caption-text">{_esc(photo.get("side_caption"))}</span></div>
+      </div>
+      <aside class="info-panel">
+        <h2>AI 分析</h2>
+        <p class="description">{_esc(photo.get("caption"))}</p>
+        <div class="score-row">
+          <span class="muted">回忆度</span>
+          <div class="bar"><span style="--value: {_score_width(photo.get("memory_score"))}%"></span></div>
+          <strong>{_esc(_fmt_score(photo.get("memory_score")))}</strong>
+        </div>
+        <div class="score-row">
+          <span class="muted">美观度</span>
+          <div class="bar"><span style="--value: {_score_width(photo.get("beauty_score"))}%"></span></div>
+          <strong>{_esc(_fmt_score(photo.get("beauty_score")))}</strong>
+        </div>
+        <div class="reason">
+          <strong>评分理由</strong>
+          <div class="muted">{_esc(photo.get("reason"))}</div>
+        </div>
+      </aside>
+    </section>
+    """
+
+
+def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
+    return f"""
+    <section class="hero">
+      <div>
+        <p class="status-kicker">Push Studio</p>
+        <h1>{_esc(photo.get("side_caption") or "单张推送工作台")}</h1>
+        <p class="lead">完整构图、文案微调和设备一致预览将在后续任务实现；当前入口已按 photo_id 对齐。</p>
+      </div>
+      <div class="stats">
+        <a class="button" href="/gallery">返回画廊</a>
+      </div>
+    </section>
+    <section class="detail-grid">
+      <div class="preview-panel">
+        <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
+        <div class="paper-caption"><span class="paper-caption-text">{_esc(photo.get("side_caption"))}</span></div>
+      </div>
+      <aside class="info-panel">
+        <h2>推送准备</h2>
+        <p class="description">这张照片已经可以作为后续推送工作台的输入。</p>
+        <div class="actions">
+          <a class="button" href="/photos/{_esc(photo.get("photo_id"))}">查看详情</a>
+          <a class="button" href="/renders">旧渲染成品</a>
+        </div>
+      </aside>
+    </section>
+    """
+
+
 def create_app(
     *,
     db_path: str | Path | None = None,
@@ -795,11 +1169,80 @@ def create_app(
 
     @app.get("/")
     def index():
-        return redirect("/renders")
+        status = load_status(
+            db,
+            monitor_dir=_resolve_path(_config_value("IMAGE_DIR", "./sample_photos")),
+            push_dir=push_dir,
+        )
+        return _page("InkTime 状态中控台", _render_dashboard_page(status))
 
     @app.get("/healthz")
     def healthz():
         return jsonify({"ok": True})
+
+    @app.get("/api/status")
+    def api_status():
+        return jsonify(
+            load_status(
+                db,
+                monitor_dir=_resolve_path(_config_value("IMAGE_DIR", "./sample_photos")),
+                push_dir=push_dir,
+            )
+        )
+
+    @app.get("/gallery")
+    def gallery():
+        sort = str(request.args.get("sort", "score"))
+        limit = min(200, max(1, int(request.args.get("limit", 60))))
+        photos = load_photos(
+            db,
+            limit=limit,
+            sort=sort,
+            random_seed=str(request.args.get("seed") or ""),
+        )
+        return _page("InkTime 画廊", _render_gallery_page(photos, sort=sort, limit=limit))
+
+    @app.get("/api/photos")
+    def api_photos():
+        sort = str(request.args.get("sort", "score"))
+        limit = min(200, max(1, int(request.args.get("limit", 60))))
+        include_missing = request.args.get("include_missing") in {"1", "true", "yes"}
+        return jsonify(
+            {
+                "ok": True,
+                "photos": load_photos(
+                    db,
+                    limit=limit,
+                    sort=sort,
+                    include_missing=include_missing,
+                    random_seed=str(request.args.get("seed") or ""),
+                ),
+            }
+        )
+
+    @app.get("/api/photos/<int:photo_id>/source")
+    def photo_source(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        target = Path(str(photo.get("path") or "")).expanduser()
+        if not target.exists() or not target.is_file():
+            abort(404)
+        return send_file(target)
+
+    @app.get("/photos/<int:photo_id>")
+    def photo_detail(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        return _page("照片详情", _render_photo_database_detail(photo))
+
+    @app.get("/push-studio/<int:photo_id>")
+    def push_studio(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        return _page("单张推送工作台", _render_push_studio_placeholder(photo))
 
     @app.get("/renders")
     def renders():
