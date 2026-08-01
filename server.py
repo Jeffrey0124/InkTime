@@ -167,541 +167,61 @@ def _display_location(item: dict[str, Any]) -> str:
     return str(item.get("exif_city") or "").strip()
 
 
-def _page(title: str, body: str) -> str:
+def _page(title: str, body: str, *, active: str = "dashboard") -> str:
+    active_dashboard = "active" if active == "dashboard" else ""
+    active_gallery = "active" if active == "gallery" else ""
+    active_studio = "active" if active == "studio" else ""
+    active_settings = "active" if active == "settings" else ""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
-  <style>
-    :root {{
-      color-scheme: light;
-      --page: #f7f8f4;
-      --panel: rgba(255, 255, 252, 0.94);
-      --panel-strong: rgba(255, 255, 252, 0.98);
-      --line: rgba(22, 34, 27, 0.13);
-      --line-soft: rgba(22, 34, 27, 0.08);
-      --text: #121711;
-      --muted: #667168;
-      --subtle: #8b938c;
-      --mint: #8ff0c2;
-      --gold: #ffd36e;
-      --coral: #ff9a72;
-      --blue: #7ab8ff;
-      --green: #0b7d4b;
-      --shadow: 0 20px 70px rgba(31, 45, 36, 0.12);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      min-height: 100vh;
-      font: 14px/1.65 "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
-      color: var(--text);
-      background:
-        linear-gradient(120deg, rgba(221, 244, 232, 0.8), transparent 36%),
-        linear-gradient(270deg, rgba(242, 226, 198, 0.48), transparent 42%),
-        var(--page);
-    }}
-    a {{ color: inherit; text-decoration: none; }}
-    .topbar {{
-      position: sticky;
-      top: 0;
-      z-index: 10;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 18px;
-      padding: 16px clamp(18px, 4vw, 54px);
-      border-bottom: 1px solid var(--line-soft);
-      background: rgba(247, 248, 244, 0.86);
-      backdrop-filter: blur(18px);
-    }}
-    .brand {{
-      display: flex;
-      flex-direction: column;
-      gap: 1px;
-      min-width: 0;
-    }}
-    .brand strong {{
-      font-size: 17px;
-      letter-spacing: 0;
-      white-space: nowrap;
-    }}
-    .brand span {{
-      color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
-    }}
-    nav {{
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }}
-    nav a, .button {{
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 34px;
-      padding: 7px 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.72);
-      color: var(--text);
-      font-weight: 650;
-    }}
-    nav a:hover, .button:hover, .render-card:hover {{
-      border-color: rgba(143, 240, 194, 0.48);
-    }}
-    main {{
-      width: min(1460px, calc(100vw - 40px));
-      margin: 24px auto 56px;
-    }}
-    .hero {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 18px;
-      align-items: end;
-      margin-bottom: 18px;
-    }}
-    h1 {{
-      margin: 0;
-      font-size: clamp(26px, 4vw, 42px);
-      line-height: 1.18;
-      letter-spacing: 0;
-    }}
-    h2 {{
-      margin: 0 0 12px;
-      font-size: 16px;
-      letter-spacing: 0;
-    }}
-    .lead {{
-      margin: 9px 0 0;
-      max-width: 820px;
-      color: var(--muted);
-      font-size: 15px;
-    }}
-    .stats {{
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }}
-    .chip, .pill {{
-      display: inline-flex;
-      align-items: center;
-      min-height: 28px;
-      padding: 5px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.72);
-      color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
-    }}
-    .pill {{
-      border-color: rgba(11, 125, 75, 0.2);
-      background: rgba(11, 125, 75, 0.08);
-      color: var(--green);
-    }}
-    .gallery-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 18px;
-    }}
-    .render-card {{
-      display: grid;
-      overflow: hidden;
-      min-width: 0;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      box-shadow: var(--shadow);
-    }}
-    .thumb {{
-      display: block;
-      width: 100%;
-      aspect-ratio: 50 / 27;
-      object-fit: contain;
-      background: #f5f1e8;
-      border-bottom: 1px solid var(--line-soft);
-    }}
-    .card-copy {{
-      min-width: 0;
-      padding: 13px 14px 15px;
-    }}
-    .caption {{
-      margin: 0 0 7px;
-      font-size: 15px;
-      font-weight: 750;
-      line-height: 1.45;
-    }}
-    .muted {{
-      color: var(--muted);
-    }}
-    .small {{
-      color: var(--muted);
-      font-size: 12px;
-      overflow-wrap: anywhere;
-    }}
-    .score-line {{
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin-top: 10px;
-      color: var(--mint);
-      font-weight: 800;
-    }}
-    .empty {{
-      padding: 32px;
-      border: 1px dashed var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      color: var(--muted);
-    }}
-    .dashboard-grid {{
-      display: grid;
-      grid-template-columns: minmax(360px, 1.15fr) minmax(320px, 0.85fr);
-      gap: 18px;
-      align-items: stretch;
-    }}
-    .status-panel, .metric-card, .photo-card {{
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      box-shadow: var(--shadow);
-    }}
-    .status-panel {{
-      padding: clamp(22px, 3vw, 34px);
-    }}
-    .status-kicker {{
-      margin: 0 0 14px;
-      color: var(--green);
-      font-weight: 850;
-    }}
-    .status-title {{
-      margin: 0;
-      max-width: 780px;
-      font-size: clamp(28px, 4vw, 52px);
-      line-height: 1.12;
-      letter-spacing: 0;
-    }}
-    .metric-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-      margin: 18px 0;
-    }}
-    .metric-card {{
-      padding: 16px;
-      min-width: 0;
-    }}
-    .metric-card span {{
-      display: block;
-      color: var(--muted);
-      font-size: 12px;
-    }}
-    .metric-card strong {{
-      display: block;
-      margin-top: 5px;
-      font-size: clamp(24px, 3vw, 38px);
-      line-height: 1;
-    }}
-    .dashboard-actions, .gallery-toolbar {{
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 10px;
-    }}
-    .latest-push {{
-      display: grid;
-      gap: 12px;
-      padding: 18px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      box-shadow: var(--shadow);
-    }}
-    .latest-push img {{
-      width: 100%;
-      aspect-ratio: 5 / 3;
-      object-fit: contain;
-      border-radius: 8px;
-      background: #f5f1e8;
-      border: 1px solid var(--line-soft);
-    }}
-    .gallery-toolbar {{
-      justify-content: space-between;
-      margin: 0 0 18px;
-      padding: 14px 0;
-      border-top: 1px solid var(--line-soft);
-      border-bottom: 1px solid var(--line-soft);
-    }}
-    select {{
-      min-height: 38px;
-      padding: 7px 34px 7px 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.82);
-      color: var(--text);
-      font: inherit;
-      font-weight: 650;
-    }}
-    .photo-masonry {{
-      columns: 3 280px;
-      column-gap: 18px;
-    }}
-    .photo-card {{
-      position: relative;
-      display: inline-block;
-      width: 100%;
-      overflow: hidden;
-      margin: 0 0 18px;
-      break-inside: avoid;
-    }}
-    .photo-card img {{
-      display: block;
-      width: 100%;
-      height: auto;
-      background: #f5f1e8;
-    }}
-    .photo-card-copy {{
-      padding: 14px 15px 16px;
-    }}
-    .score-badge {{
-      position: absolute;
-      right: 12px;
-      bottom: 78px;
-      display: grid;
-      place-items: center;
-      min-width: 58px;
-      min-height: 58px;
-      padding: 8px;
-      border-radius: 999px;
-      background: #111711;
-      color: #fff;
-      font-weight: 900;
-      line-height: 1.05;
-      text-align: center;
-      box-shadow: 0 12px 30px rgba(17, 23, 17, 0.24);
-    }}
-    .score-badge small {{
-      display: block;
-      font-size: 10px;
-      font-weight: 700;
-      color: rgba(255,255,255,.75);
-    }}
-    .photo-card-actions {{
-      position: absolute;
-      top: 12px;
-      right: 12px;
-      display: flex;
-      gap: 8px;
-      opacity: 0;
-      transform: translateY(-4px);
-      transition: opacity .16s ease, transform .16s ease;
-    }}
-    .photo-card:hover .photo-card-actions,
-    .photo-card:focus-within .photo-card-actions {{
-      opacity: 1;
-      transform: translateY(0);
-    }}
-    .primary-button {{
-      border-color: rgba(11, 125, 75, 0.2);
-      background: #22b573;
-      color: #fff;
-      box-shadow: 0 12px 28px rgba(34, 181, 115, 0.2);
-    }}
-    .detail-grid {{
-      display: grid;
-      grid-template-columns: minmax(320px, 800px) minmax(320px, 1fr);
-      gap: 26px;
-      align-items: start;
-    }}
-    .preview-panel {{
-      display: grid;
-      grid-template-rows: minmax(0, 1fr) 10%;
-      aspect-ratio: 5 / 3;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel-strong);
-      box-shadow: var(--shadow);
-    }}
-    .preview-panel img {{
-      display: block;
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      background: #f5f1e8;
-    }}
-    .paper-caption {{
-      padding: 14px 18px;
-      background: #f5f1e8;
-      color: #1d1d1b;
-      font-size: 17px;
-      line-height: 1.45;
-      font-family: "KaiTi", "STKaiti", "Microsoft YaHei", serif;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 18px;
-      min-height: 0;
-      overflow: hidden;
-    }}
-    .paper-caption-text {{
-      min-width: 0;
-    }}
-    .paper-location {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      color: #8a877f;
-      flex: 0 0 auto;
-      white-space: nowrap;
-    }}
-    .paper-location img {{
-      display: block;
-      width: 20px;
-      height: 20px;
-      opacity: 0.75;
-    }}
-    .info-panel {{
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      box-shadow: var(--shadow);
-      padding: clamp(18px, 3vw, 28px);
-      overflow: auto;
-    }}
-    .quote-title {{
-      margin: 0 0 14px;
-      font-size: clamp(22px, 3vw, 34px);
-      line-height: 1.25;
-      letter-spacing: 0;
-    }}
-    .pills {{
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-bottom: 20px;
-    }}
-    .description {{
-      margin: 0 0 18px;
-      color: var(--text);
-      font-size: 15px;
-    }}
-    .score-row {{
-      display: grid;
-      grid-template-columns: 58px minmax(120px, 1fr) 44px;
-      gap: 10px;
-      align-items: center;
-      margin: 11px 0;
-    }}
-    .bar {{
-      height: 10px;
-      overflow: hidden;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.12);
-    }}
-    .bar span {{
-      display: block;
-      width: var(--value);
-      height: 100%;
-      border-radius: inherit;
-      background: linear-gradient(90deg, var(--blue), var(--mint));
-    }}
-    .score-row:nth-of-type(2) .bar span {{
-      background: linear-gradient(90deg, var(--gold), var(--coral));
-    }}
-    .reason {{
-      margin-top: 20px;
-      padding-top: 18px;
-      border-top: 1px solid var(--line-soft);
-    }}
-    .reason strong {{
-      display: block;
-      margin-bottom: 6px;
-    }}
-    details {{
-      margin-top: 20px;
-      border: 1px solid var(--line-soft);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.03);
-    }}
-    summary {{
-      cursor: pointer;
-      padding: 12px 14px;
-      color: var(--text);
-      font-weight: 700;
-    }}
-    .detail-list {{
-      display: grid;
-      gap: 8px;
-      padding: 0 14px 14px;
-      color: var(--muted);
-      overflow-wrap: anywhere;
-    }}
-    .actions {{
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-top: 18px;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-    }}
-    th, td {{
-      padding: 13px 14px;
-      border-bottom: 1px solid var(--line-soft);
-      text-align: left;
-      vertical-align: top;
-    }}
-    th {{
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 750;
-    }}
-    tr:last-child td {{ border-bottom: 0; }}
-    @media (max-width: 900px) {{
-      .topbar, .hero {{
-        align-items: flex-start;
-        grid-template-columns: 1fr;
-      }}
-      .topbar {{
-        flex-direction: column;
-      }}
-      nav, .stats {{
-        justify-content: flex-start;
-      }}
-      main {{
-        width: min(100% - 24px, 1460px);
-        margin-top: 18px;
-      }}
-      .detail-grid {{
-        grid-template-columns: 1fr;
-      }}
-      .gallery-grid {{
-        grid-template-columns: 1fr;
-      }}
-    }}
-  </style>
+  <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/">
-      <strong>InkTime PhotoPainter</strong>
-      <span>照片瀑布流 | 批量预览 | 设备推送</span>
-    </a>
-    <nav><a href="/">中控台</a><a href="/gallery">画廊</a><a href="/renders">旧渲染</a><a href="/review">分析结果</a></nav>
-  </header>
-  <main>{body}</main>
+  <div class="app-shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="mark" href="/" aria-label="InkTime PhotoPainter">
+        <span class="mark-dot"></span>
+        <span>InkTime</span>
+      </a>
+      <nav class="rail-nav">
+        <a class="{active_dashboard}" href="/">
+          <span class="nav-icon">⌂</span>
+          <span>中控台</span>
+        </a>
+        <a class="{active_gallery}" href="/gallery">
+          <span class="nav-icon">▦</span>
+          <span>画廊</span>
+        </a>
+        <a class="{active_studio}" href="/push-studio">
+          <span class="nav-icon">□</span>
+          <span>推送工作台</span>
+        </a>
+        <a class="{active_settings}" href="/settings">
+          <span class="nav-icon">◌</span>
+          <span>设置</span>
+        </a>
+      </nav>
+      <div class="rail-note">
+        <span class="status-dot"></span>
+        本地 WebUI<br>
+        真实数据驱动
+      </div>
+    </aside>
+    <main class="workspace">
+      <header class="topbar">
+        <div class="hero-title">
+          <p class="hero-script">Warmth Archive</p>
+          <h1>收集散落的人间暖意，定格每一段时光</h1>
+          <p class="hero-subline">照片瀑布流｜批量预览｜设备推送</p>
+        </div>
+      </header>
+      {body}
+    </main>
+  </div>
   <script>
     (() => {{
       const syncDetailPanels = () => {{
@@ -939,65 +459,116 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
     preview_url = str(recent_push.get("preview_url") or "")
     recent_time = str(recent_push.get("pushed_at") or "暂无推送")
     recent_caption = str(recent_push.get("side_caption") or recent_push.get("source_path") or "还没有设备成品")
-    monitor_badge = "目录可用" if status.get("monitor_dir_exists") else "目录不可用"
-    push_panel = (
+    state_label = "分析完成" if status.get("analyzed_photos") else "等待分析"
+    state_copy = (
+        f"{_esc(status.get('analyzed_photos'))} 张照片已入库，可以生成设备预览"
+        if status.get("analyzed_photos")
+        else "还没有已分析照片，先完成扫描与 AI 分析"
+    )
+    progress = 100
+    if status.get("monitored_files"):
+        progress = round((int(status.get("analyzed_photos") or 0) / int(status["monitored_files"])) * 100)
+        progress = max(0, min(100, progress))
+    latest_body = (
         f"""
-        <aside class="latest-push">
+        <div class="push-preview">
+          <img src="{_esc(preview_url)}" alt="最近推送的六色预览">
           <div>
-            <p class="status-kicker">Latest Push</p>
-            <h2>最近推送</h2>
-            <p class="muted">{_esc(recent_time)}</p>
+            <strong>{_esc(recent_caption)}</strong>
+            <p>{_esc(recent_time)}</p>
+            <a class="ghost-button compact" href="/push-studio">进入工作台</a>
           </div>
-          <img src="{_esc(preview_url)}" alt="最近推送预览">
-          <p class="caption">{_esc(recent_caption)}</p>
-          <a class="button" href="/gallery">进入画廊</a>
-        </aside>
+        </div>
         """
         if preview_url
-        else f"""
-        <aside class="latest-push">
-          <div>
-            <p class="status-kicker">Latest Push</p>
-            <h2>最近推送</h2>
-            <p class="muted">{_esc(recent_time)}</p>
-          </div>
-          <div class="empty">暂无最近推送。先从画廊选择一张照片进入推送工作台。</div>
-          <a class="button" href="/gallery">进入画廊</a>
-        </aside>
-        """
+        else '<div class="empty">暂无最近推送。先从画廊选择一张照片进入推送工作台。</div>'
     )
     return f"""
-    <section class="hero">
-      <div>
-        <p class="status-kicker">Warmth Archive</p>
-        <h1>收集散落的人间暖意，定格每一段时光</h1>
-        <p class="lead">状态中控台｜照片瀑布流｜批量预览｜设备推送</p>
-      </div>
-      <div class="stats">
-        <span class="chip">{_esc(monitor_badge)}</span>
-        <span class="chip">数据库 {_esc("可用" if status.get("health", {}).get("database_exists") else "未创建")}</span>
-      </div>
-    </section>
-    <section class="dashboard-grid">
-      <div>
-        <div class="status-panel">
-          <p class="status-kicker">Dashboard</p>
-          <h2 class="status-title">{_esc(status.get("analyzed_photos"))} 张照片已分析，画廊可以浏览</h2>
-          <p class="lead">监控目录：{_esc(status.get("monitor_dir"))}</p>
+    <section class="screen dashboard-screen" aria-labelledby="dashboard-title">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">Dashboard</p>
+          <h2 id="dashboard-title">状态中控台</h2>
         </div>
-        <div class="metric-grid">
-          <div class="metric-card"><span>监控照片</span><strong>{_esc(status.get("monitored_files"))}</strong></div>
-          <div class="metric-card"><span>已分析</span><strong>{_esc(status.get("analyzed_photos"))}</strong></div>
-          <div class="metric-card"><span>待分析估算</span><strong>{_esc(status.get("unanalyzed_estimate"))}</strong></div>
-          <div class="metric-card"><span>缺失标记</span><strong>{_esc(status.get("missing_photos"))}</strong></div>
-        </div>
-        <div class="dashboard-actions">
-          <a class="button primary-button" href="/gallery">打开画廊</a>
-          <a class="button" href="/renders">查看旧渲染成品</a>
-          <a class="button" href="/review">分析结果</a>
-        </div>
+        <div class="directory-chip" title="监控目录">{_esc(status.get("monitor_dir"))}</div>
       </div>
-      {push_panel}
+
+      <section class="status-band">
+        <div class="status-copy">
+          <span class="state-label good">{_esc(state_label)}</span>
+          <h3>{state_copy}</h3>
+          <p>本地模型可用时优先使用；失败后自动切换云端通道。缺失照片只标记，不自动删除。</p>
+        </div>
+        <div class="status-meter" aria-label="分析进度">
+          <div class="meter-head">
+            <span>分析进度</span>
+            <strong>{progress}%</strong>
+          </div>
+          <div class="meter"><span style="width: {progress}%"></span></div>
+        </div>
+      </section>
+
+      <section class="metric-grid" aria-label="照片库统计">
+        <article class="metric-tile">
+          <span>监控照片</span>
+          <strong>{_esc(status.get("monitored_files"))}</strong>
+          <small>当前目录可用于 AI 计算</small>
+        </article>
+        <article class="metric-tile">
+          <span>已分析</span>
+          <strong>{_esc(status.get("analyzed_photos"))}</strong>
+          <small>已写入数据库</small>
+        </article>
+        <article class="metric-tile">
+          <span>待分析估算</span>
+          <strong>{_esc(status.get("unanalyzed_estimate"))}</strong>
+          <small>按监控目录估算</small>
+        </article>
+        <article class="metric-tile warning">
+          <span>缺失标记</span>
+          <strong>{_esc(status.get("missing_photos"))}</strong>
+          <small>等待人工清理</small>
+        </article>
+      </section>
+
+      <section class="dashboard-grid">
+        <div class="action-dock" aria-label="快捷操作">
+          <button class="dock-action primary" type="button">开始 / 暂停分析</button>
+          <a class="dock-action" href="/api/status">重新扫描照片库</a>
+          <button class="dock-action" type="button">停止分析</button>
+          <a class="dock-action" href="/renders">立即生成预览</a>
+          <a class="dock-action" href="/gallery">进入画廊</a>
+          <a class="dock-action" href="/settings">模型设置</a>
+          <a class="dock-action" href="/renders">打开输出目录</a>
+        </div>
+
+        <article class="latest-push" aria-label="最近推送">
+          <div class="panel-head">
+            <div>
+              <p class="kicker">Latest Push</p>
+              <h3>最近推送</h3>
+            </div>
+            <span class="state-label">{_esc(recent_push.get("trigger_type") or "无记录")}</span>
+          </div>
+          {latest_body}
+        </article>
+
+        <article class="log-panel" aria-label="运行日志">
+          <div class="panel-head">
+            <div>
+              <p class="kicker">Log</p>
+              <h3>运行日志</h3>
+            </div>
+            <button class="text-button" type="button">折叠</button>
+          </div>
+          <ol class="log-list">
+            <li><time>就绪</time><span>本地 WebUI 已启动。</span></li>
+            <li><time>数据库</time><span>已分析 {_esc(status.get("analyzed_photos"))} 张照片。</span></li>
+            <li><time>目录</time><span>发现 {_esc(status.get("monitored_files"))} 个可用图片文件。</span></li>
+            <li><time>缺失</time><span>{_esc(status.get("missing_photos"))} 张照片被标记 missing。</span></li>
+          </ol>
+        </article>
+      </section>
     </section>
     """
 
@@ -1014,7 +585,7 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
         for value, label in sort_options
     )
     cards: list[str] = []
-    for photo in photos:
+    for index, photo in enumerate(photos):
         score = _fmt_score(photo.get("score"))
         meta = " · ".join(
             part
@@ -1025,16 +596,15 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
             ]
             if part
         )
+        shape = " tall" if index % 5 in {0, 4} else " wide" if index % 5 == 2 else ""
         cards.append(
             f"""
-            <article class="photo-card" tabindex="0">
+            <article class="photo-card{shape}" tabindex="0">
+              <a class="push-float" href="/push-studio/{_esc(photo.get("photo_id"))}">加入推送</a>
               <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}" loading="lazy">
-              <div class="photo-card-actions">
-                <a class="button primary-button" href="/push-studio/{_esc(photo.get("photo_id"))}">加入推送 ↗</a>
-              </div>
-              <div class="score-badge">{_esc(score)}<small>综合分</small></div>
-              <div class="photo-card-copy">
-                <p class="caption">{_esc(photo.get("side_caption"))}</p>
+              <div class="photo-copy">
+                <div class="score-pair"><span>{_esc(score)}</span><small>综合分</small></div>
+                <h3>{_esc(photo.get("side_caption"))}</h3>
                 <p class="small">{_esc(meta or "暂无日期/地点")}</p>
                 <p class="small"><a href="/photos/{_esc(photo.get("photo_id"))}">查看详情</a></p>
               </div>
@@ -1050,27 +620,23 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
             """
         )
     return f"""
-    <section class="hero">
-      <div>
-        <p class="status-kicker">Gallery</p>
-        <h1>已分析照片瀑布流</h1>
-        <p class="lead">从数据库读取已分析且仍存在于磁盘的照片，不再使用旧 manifest 下标作为身份。</p>
+    <section class="screen gallery-screen" aria-labelledby="gallery-title">
+      <div class="section-heading sticky-heading">
+        <div>
+          <p class="kicker">Gallery</p>
+          <h2 id="gallery-title">已分析照片瀑布流</h2>
+        </div>
+        <form class="toolbar" method="get" action="/gallery">
+          <label>
+            <span>排序</span>
+            <select name="sort" onchange="this.form.submit()">{options}</select>
+          </label>
+          <input type="hidden" name="limit" value="{_esc(limit)}">
+          <button class="ghost-button" type="submit">刷新候选</button>
+        </form>
       </div>
-      <div class="stats">
-        <span class="chip">{len(photos)} 张</span>
-        <span class="chip">最多 {limit} 张</span>
-      </div>
+      <section class="masonry" aria-label="照片列表">{"".join(cards)}</section>
     </section>
-    <form class="gallery-toolbar" method="get" action="/gallery">
-      <label class="small">排序
-        <select name="sort" onchange="this.form.submit()">{options}</select>
-      </label>
-      <div>
-        <input type="hidden" name="limit" value="{_esc(limit)}">
-        <button class="button" type="submit">刷新候选</button>
-      </div>
-    </form>
-    <section class="photo-masonry">{"".join(cards)}</section>
     """
 
 
@@ -1153,6 +719,46 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
     """
 
 
+def _render_settings_page() -> str:
+    return """
+    <section class="screen settings-screen" aria-labelledby="settings-title">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">Settings Preview</p>
+          <h2 id="settings-title">配置页视觉草案</h2>
+        </div>
+      </div>
+      <div class="settings-layout">
+        <article class="setting-row">
+          <div>
+            <h3>local_lmstudio</h3>
+            <p>本地模型通道；真实模型名和 URL 来自本地配置。</p>
+          </div>
+          <span class="state-label good">可用性待测</span>
+        </article>
+        <article class="setting-row">
+          <div>
+            <h3>cloud_qwen</h3>
+            <p>云端兜底通道；前端不展示真实 API key。</p>
+          </div>
+          <span class="state-label">兜底</span>
+        </article>
+        <article class="setting-row">
+          <div>
+            <h3>画廊批量偏好</h3>
+            <p>批量选择只在选择模式中展开，画廊主视图保持浏览优先。</p>
+          </div>
+          <label class="setting-control">默认选择前 <input class="mini-input" type="number" value="20"> 张</label>
+        </article>
+        <article class="setting-note">
+          <strong>密钥不在前端显示</strong>
+          <p>配置页只展示通道、模型、URL、timeout 和连通性状态；真实 API key 继续来自 config.py 或 NAS .env。</p>
+        </article>
+      </div>
+    </section>
+    """
+
+
 def create_app(
     *,
     db_path: str | Path | None = None,
@@ -1174,7 +780,7 @@ def create_app(
             monitor_dir=_resolve_path(_config_value("IMAGE_DIR", "./sample_photos")),
             push_dir=push_dir,
         )
-        return _page("InkTime 状态中控台", _render_dashboard_page(status))
+        return _page("InkTime 状态中控台", _render_dashboard_page(status), active="dashboard")
 
     @app.get("/healthz")
     def healthz():
@@ -1200,7 +806,11 @@ def create_app(
             sort=sort,
             random_seed=str(request.args.get("seed") or ""),
         )
-        return _page("InkTime 画廊", _render_gallery_page(photos, sort=sort, limit=limit))
+        return _page(
+            "InkTime 画廊",
+            _render_gallery_page(photos, sort=sort, limit=limit),
+            active="gallery",
+        )
 
     @app.get("/api/photos")
     def api_photos():
@@ -1235,19 +845,30 @@ def create_app(
         photo = load_photo(db, photo_id)
         if photo is None or not photo.get("exists_on_disk"):
             abort(404)
-        return _page("照片详情", _render_photo_database_detail(photo))
+        return _page("照片详情", _render_photo_database_detail(photo), active="gallery")
 
     @app.get("/push-studio/<int:photo_id>")
     def push_studio(photo_id: int):
         photo = load_photo(db, photo_id)
         if photo is None or not photo.get("exists_on_disk"):
             abort(404)
-        return _page("单张推送工作台", _render_push_studio_placeholder(photo))
+        return _page("单张推送工作台", _render_push_studio_placeholder(photo), active="studio")
+
+    @app.get("/push-studio")
+    def push_studio_index():
+        photos = load_photos(db, limit=1)
+        if photos:
+            return redirect(f"/push-studio/{photos[0]['photo_id']}")
+        return redirect("/gallery")
+
+    @app.get("/settings")
+    def settings():
+        return _page("配置页视觉草案", _render_settings_page(), active="settings")
 
     @app.get("/renders")
     def renders():
         manifest = _load_manifest(render_dir)
-        return _page("PhotoPainter 渲染成品", _render_renders_page(manifest))
+        return _page("PhotoPainter 渲染成品", _render_renders_page(manifest), active="gallery")
 
     @app.get("/renders/<int:item_id>")
     def render_detail(item_id: int):
@@ -1255,12 +876,16 @@ def create_app(
         renders = manifest.get("renders", [])
         if item_id < 0 or item_id >= len(renders):
             abort(404)
-        return _page("渲染效果预览", _render_detail_page(manifest, renders[item_id], item_id))
+        return _page(
+            "渲染效果预览",
+            _render_detail_page(manifest, renders[item_id], item_id),
+            active="studio",
+        )
 
     @app.get("/review")
     def review():
         rows = _read_review_rows(db)
-        return _page("照片分析结果", _render_review_page(rows))
+        return _page("照片分析结果", _render_review_page(rows), active="dashboard")
 
     @app.get("/static/renders/<path:filename>")
     def render_static(filename: str):
