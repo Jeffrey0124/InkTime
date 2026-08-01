@@ -14,6 +14,7 @@ from typing import Any
 
 from flask import Flask, abort, jsonify, redirect, request, send_file
 
+from photo_identity import ensure_photo_identity_schema
 from push_manager import PushSettings, ensure_push_schema, publish_render
 from render_photopainter import render_from_database
 
@@ -789,6 +790,7 @@ def create_app(
         render_output_dir or _config_value("RENDER_OUTPUT_DIR", "./output/photopainter")
     )
     push_dir = _resolve_path(_config_value("PUSH_OUTPUT_DIR", "./output/push"))
+    ensure_photo_identity_schema(db)
     ensure_push_schema(db)
 
     @app.get("/")
