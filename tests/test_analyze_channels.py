@@ -1,7 +1,12 @@
 import importlib
+import json
+import sqlite3
 import sys
 import types
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 class _FakeResponse:
@@ -107,6 +112,44 @@ class AnalyzeChannelFallbackTests(unittest.TestCase):
 
         self.assertAlmostEqual(lat, 31.2507444, places=6)
         self.assertAlmostEqual(lon, 121.4412389, places=6)
+
+    def test_existing_rows_backfill_location_without_ai_analysis(self):
+        mod = self._load_module()
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.jpg"
+            source.write_bytes(b"photo")
+            conn = sqlite3.connect(":memory:")
+            conn.executescript(
+                """
+                CREATE TABLE _temp_existing_paths (path TEXT PRIMARY KEY);
+                CREATE TABLE photo_scores (
+                  path TEXT PRIMARY KEY, exif_json TEXT,
+                  exif_gps_lat REAL, exif_gps_lon REAL, exif_gps_alt REAL,
+                  exif_city TEXT, location_hint TEXT
+                );
+                """
+            )
+            conn.execute("INSERT INTO _temp_existing_paths VALUES (?)", (str(source),))
+            conn.execute(
+                "INSERT INTO photo_scores(path, exif_json, exif_city, location_hint) VALUES (?, ?, '', '')",
+                (str(source), json.dumps({"datetime": "2026:04:05 21:12:27"})),
+            )
+
+            with patch.object(
+                mod,
+                "read_exif",
+                return_value={"gps_lat": 30.8156, "gps_lon": 120.8246, "gps_alt": 8.5},
+            ):
+                count = mod.backfill_existing_location_metadata(conn, lambda lat, lon: "嘉興市")
+
+            row = conn.execute(
+                "SELECT exif_city, location_hint, exif_gps_lat, exif_gps_lon FROM photo_scores"
+            ).fetchone()
+            conn.close()
+            self.assertEqual(count, 1)
+            self.assertEqual(row[:2], ("嘉興市", "嘉興市"))
+            self.assertAlmostEqual(row[2], 30.8156)
+            self.assertAlmostEqual(row[3], 120.8246)
 
 
 if __name__ == "__main__":

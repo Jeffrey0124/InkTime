@@ -17,12 +17,14 @@ from PIL import Image, ImageDraw
 
 from photopainter_renderer import (
     DITHER_ATKINSON,
+    DITHER_NONE,
     SIX_COLOR_PALETTE,
     _fit_single_line,
     _draw_location_pin,
     _load_text_font,
     _text_size,
     enhance_for_eink,
+    fit_manual_transform_to_canvas,
     fit_to_photopainter_canvas,
     quantize_six_color,
 )
@@ -56,6 +58,34 @@ class PushSettings:
     exclude_days: int = 90
 
 
+@dataclass(frozen=True)
+class PushLayout:
+    width: int
+    image_height: int
+    final_height: int
+    caption_height: int
+    portrait: bool = False
+
+
+def _layout_for_orientation(settings: PushSettings, orientation: str) -> PushLayout:
+    if str(orientation).lower() == "portrait":
+        caption_height = max(1, settings.caption_height * 2)
+        final_height = settings.width
+        return PushLayout(
+            width=settings.final_height,
+            image_height=final_height - caption_height,
+            final_height=final_height,
+            caption_height=caption_height,
+            portrait=True,
+        )
+    return PushLayout(
+        width=settings.width,
+        image_height=settings.image_height,
+        final_height=settings.final_height,
+        caption_height=settings.caption_height,
+    )
+
+
 def _resolve_path(path: str | Path, *, base: Path = ROOT_DIR) -> Path:
     resolved = Path(path).expanduser()
     if not resolved.is_absolute():
@@ -65,6 +95,21 @@ def _resolve_path(path: str | Path, *, base: Path = ROOT_DIR) -> Path:
 
 def _config_value(name: str, default: Any) -> Any:
     return getattr(cfg, name, default)
+
+
+def normalize_render_overrides(value: Any) -> dict[str, Any]:
+    saved = _json_object(value)
+    normalized: dict[str, Any] = {
+        "show_caption": True,
+        "show_date": True,
+        "show_location": True,
+        "frame_orientation": "landscape",
+    }
+    normalized.update(saved)
+    normalized["display_defaults_version"] = 2
+    if normalized.get("frame_orientation") not in {"landscape", "portrait"}:
+        normalized["frame_orientation"] = "landscape"
+    return normalized
 
 
 def timezone_from_name(name: str) -> dt.tzinfo:
@@ -148,22 +193,51 @@ def _render_item_from_manifest(render_id: int, settings: PushSettings) -> dict[s
 
 
 def _short_caption(item: dict[str, Any]) -> str:
+    if item.get("_hide_caption"):
+        return ""
     return str(item.get("side_caption") or item.get("caption") or "未命名照片").strip()
 
 
-def _draw_binary_text(
-    canvas: Image.Image,
-    xy: tuple[int, int],
-    text: str,
-    *,
-    font,
-    fill: tuple[int, int, int] = (0, 0, 0),
-) -> None:
-    mask = Image.new("L", canvas.size, 0)
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.text(xy, text, fill=255, font=font)
-    mask = mask.point(lambda value: 255 if value >= 96 else 0)
-    canvas.paste(fill, mask=mask)
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _with_saved_overrides(item: dict[str, Any], db_path: Path) -> dict[str, Any]:
+    """让手动推送和定时推送复用 WebUI 保存的单张参数。"""
+    source_path = str(item.get("source_path") or "")
+    if not source_path or not db_path.exists():
+        return dict(item)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT o.custom_side_caption, o.manual_crop_json, o.render_overrides_json
+            FROM photos p
+            JOIN photo_overrides o ON o.photo_id = p.id
+            WHERE p.path = ?
+            """,
+            (source_path,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.close()
+    result = dict(item)
+    if row is not None:
+        if row["custom_side_caption"]:
+            result["side_caption"] = row["custom_side_caption"]
+        result["manual_crop_json"] = row["manual_crop_json"] or ""
+        result["render_overrides_json"] = row["render_overrides_json"] or ""
+    return result
 
 
 def _draw_caption_bar(
@@ -171,12 +245,13 @@ def _draw_caption_bar(
     *,
     item: dict[str, Any],
     settings: PushSettings,
+    layout: PushLayout,
 ) -> None:
     draw = ImageDraw.Draw(canvas)
-    width = settings.width
-    bar_top = settings.final_height - settings.caption_height
-    margin = 28
-    draw.rectangle((0, bar_top, width, settings.final_height), fill=(255, 255, 255))
+    width = layout.width
+    bar_top = layout.final_height - layout.caption_height
+    margin = 24 if layout.portrait else 28
+    draw.rectangle((0, bar_top, width, layout.final_height), fill=(255, 255, 255))
 
     location = str(item.get("exif_city") or "").strip()
     icon_size = 16
@@ -185,28 +260,43 @@ def _draw_caption_bar(
     location_font = _load_text_font(settings.font_path, 17)
     location_text_width = _text_size(draw, location_text, location_font)[0] if location_text else 0
     location_width = icon_size + icon_gap + location_text_width if location_text else 0
-    caption_max_width = max(80, width - margin * 2 - location_width - (18 if location else 0))
+    caption_max_width = max(
+        80,
+        width - margin * 2 if layout.portrait else width - margin * 2 - location_width - (18 if location else 0),
+    )
     caption, caption_font = _fit_single_line(
         draw,
         _short_caption(item),
         font_path=settings.font_path,
-        preferred_size=17,
-        min_size=17,
+        preferred_size=20 if layout.portrait else 17,
+        min_size=15 if layout.portrait else 17,
         max_width=caption_max_width,
     )
 
     caption_h = _text_size(draw, caption, caption_font)[1]
-    caption_y = bar_top + (settings.caption_height - caption_h) // 2 - 1
-    _draw_binary_text(canvas, (margin, caption_y), caption, font=caption_font)
+    caption_y = (
+        bar_top + 24
+        if layout.portrait
+        else bar_top + (layout.caption_height - caption_h) // 2 - 1
+    )
+    draw.text((margin, caption_y), caption, fill=(0, 0, 0), font=caption_font)
 
     if location_text:
         _, loc_h = _text_size(draw, location_text, location_font)
-        icon_x = width - margin - location_width
+        icon_x = margin if layout.portrait else width - margin - location_width
         loc_x = icon_x + icon_size + icon_gap
-        loc_y = bar_top + (settings.caption_height - loc_h) // 2 - 1
-        icon_y = bar_top + (settings.caption_height - icon_size) // 2 - 1
+        loc_y = (
+            bar_top + 72
+            if layout.portrait
+            else bar_top + (layout.caption_height - loc_h) // 2 - 1
+        )
+        icon_y = (
+            bar_top + 71
+            if layout.portrait
+            else bar_top + (layout.caption_height - icon_size) // 2 - 1
+        )
         _draw_location_pin(draw, icon_x, icon_y, size=icon_size, fill=(0, 0, 0))
-        _draw_binary_text(canvas, (loc_x, loc_y), location_text, font=location_font)
+        draw.text((loc_x, loc_y), location_text, fill=(0, 0, 0), font=location_font)
 
 
 def build_push_image(item: dict[str, Any], settings: PushSettings) -> Image.Image:
@@ -214,26 +304,65 @@ def build_push_image(item: dict[str, Any], settings: PushSettings) -> Image.Imag
     if not source.exists() or not source.is_file():
         raise FileNotFoundError(f"源文件不存在: {source}")
 
+    manual_crop = _json_object(item.get("manual_crop_json"))
+    render_overrides = normalize_render_overrides(item.get("render_overrides_json"))
+    layout = _layout_for_orientation(
+        settings, str(render_overrides.get("frame_orientation", "landscape"))
+    )
     with Image.open(source) as img:
-        fitted = fit_to_photopainter_canvas(
-            img,
-            width=settings.width,
-            height=settings.image_height,
-            mode=settings.mode,
-            crop_focus=item.get("crop_focus"),
-        )
+        if manual_crop:
+            fitted = fit_manual_transform_to_canvas(
+                img,
+                width=layout.width,
+                height=layout.image_height,
+                scale=float(manual_crop.get("scale", 1.0)),
+                offset_x=float(manual_crop.get("offset_x", manual_crop.get("x", 0.0))),
+                offset_y=float(manual_crop.get("offset_y", manual_crop.get("y", 0.0))),
+                rotation=int(manual_crop.get("rotation", 0)),
+                fit_mode=str(manual_crop.get("fit_mode", "fill")),
+            )
+        else:
+            fitted = fit_to_photopainter_canvas(
+                img,
+                width=layout.width,
+                height=layout.image_height,
+                mode=settings.mode,
+                crop_focus=item.get("crop_focus"),
+            )
 
     enhanced = enhance_for_eink(
         fitted,
-        brightness=settings.brightness,
-        contrast=settings.contrast,
-        saturation=settings.saturation,
+        brightness=float(render_overrides.get("brightness", settings.brightness)),
+        contrast=float(render_overrides.get("contrast", settings.contrast)),
+        saturation=float(render_overrides.get("saturation", settings.saturation)),
     )
-    rendered_area = quantize_six_color(enhanced, settings.dither).convert("RGB")
-    canvas = Image.new("RGB", (settings.width, settings.final_height), (255, 255, 255))
-    canvas.paste(rendered_area, (0, 0))
-    _draw_caption_bar(canvas, item=item, settings=settings)
-    return canvas
+    canvas = Image.new("RGB", (layout.width, layout.final_height), (255, 255, 255))
+    canvas.paste(enhanced, (0, 0))
+    caption_item = dict(item)
+    if not bool(render_overrides.get("show_caption", True)):
+        caption_item["_hide_caption"] = True
+        caption_item["side_caption"] = ""
+        caption_item["caption"] = ""
+    location = (
+        str(caption_item.get("exif_city") or "").strip()
+        if bool(render_overrides.get("show_location", True))
+        else ""
+    )
+    date = (
+        str(item.get("exif_date") or "").strip()
+        if bool(render_overrides.get("show_date", True))
+        else ""
+    )
+    caption_item["exif_city"] = " · ".join(value for value in (location, date) if value)
+    _draw_caption_bar(canvas, item=caption_item, settings=settings, layout=layout)
+    dither = str(render_overrides.get("dither_type", settings.dither))
+    if not bool(render_overrides.get("dither_enabled", True)):
+        dither = DITHER_NONE
+    return quantize_six_color(
+        canvas,
+        dither,
+        strength=float(render_overrides.get("dither_strength", 1.0)),
+    ).convert("RGB")
 
 
 def _now(settings: PushSettings, now: dt.datetime | None = None) -> dt.datetime:
@@ -258,7 +387,13 @@ def write_latest_files(
     settings.push_output_dir.mkdir(parents=True, exist_ok=True)
     published_at = _now(settings, now)
 
-    rendered = build_push_image(item, settings)
+    effective_item = _with_saved_overrides(item, settings.db_path)
+    rendered = build_push_image(effective_item, settings)
+    manual_crop = _json_object(effective_item.get("manual_crop_json"))
+    render_overrides = normalize_render_overrides(effective_item.get("render_overrides_json"))
+    layout = _layout_for_orientation(
+        settings, str(render_overrides.get("frame_orientation", "landscape"))
+    )
     bmp_path = settings.push_output_dir / "latest.bmp"
     png_path = settings.push_output_dir / "latest.png"
     manifest_path = settings.push_output_dir / "manifest.json"
@@ -272,14 +407,16 @@ def write_latest_files(
         "published_at": published_at.isoformat(timespec="seconds"),
         "trigger_type": trigger_type,
         "slot": slot or "",
-        "source_path": str(item.get("source_path") or ""),
-        "render_width": settings.width,
-        "render_height": settings.final_height,
-        "image_height": settings.image_height,
-        "caption_height": settings.caption_height,
-        "side_caption": _short_caption(item),
-        "exif_date": str(item.get("exif_date") or ""),
-        "exif_city": str(item.get("exif_city") or ""),
+        "source_path": str(effective_item.get("source_path") or ""),
+        "render_width": layout.width,
+        "render_height": layout.final_height,
+        "image_height": layout.image_height,
+        "caption_height": layout.caption_height,
+        "side_caption": _short_caption(effective_item),
+        "exif_date": str(effective_item.get("exif_date") or ""),
+        "exif_city": str(effective_item.get("exif_city") or ""),
+        "manual_crop": manual_crop,
+        "render_overrides": render_overrides,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -292,12 +429,12 @@ def write_latest_files(
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                str(item.get("source_path") or ""),
+                str(effective_item.get("source_path") or ""),
                 str(bmp_path),
                 manifest["published_at"],
                 trigger_type,
                 slot or "",
-                str(item.get("exif_date") or ""),
+                str(effective_item.get("exif_date") or ""),
                 note or "",
             ),
         )

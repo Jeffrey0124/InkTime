@@ -10,7 +10,7 @@
 - 已分析照片瀑布流画廊。
 - 单张详情与文案微调。
 - 独立推送工作台。
-- 按需生成且可缓存的设备一致预览。
+- 推送工作台内即时六色 Canvas 构图预览，实际推送时生成最终设备文件。
 - 渐进式数据库模型重构。
 - 为后续批量 AI 分析、配置页和照片库管理预留接口。
 
@@ -189,10 +189,9 @@ AI 分析、批量渲染等长任务不在单个 HTTP 请求里直接跑完。
 6. `/photos/<photo_id>` 单张详情。
 7. 人工文案覆盖保存。
 8. `/push-studio/<photo_id>` 单张推送工作台。
-9. 后端按需生成设备一致 PNG/BMP 预览。
-10. `render_assets` 缓存表。
-11. 保留旧路由兼容。
-12. 本地测试和最终 NAS/Docker 验收。
+9. 实际推送或定点推送时生成最终六色 PNG/BMP。
+10. 保留旧路由兼容。
+11. 本地测试和最终 NAS/Docker 验收。
 
 ### 可选加速项
 
@@ -350,12 +349,11 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 ### 预览与推送
 
-- `POST /api/photos/<photo_id>/render-preview`
-  - 按当前覆盖参数生成或复用缓存。
-  - 返回 `render_asset_id`、`preview_url`、`bmp_url`。
+- 推送工作台使用前端 Canvas 即时展示当前构图和六色抖动效果，不单独保存预览资产。
+- `render_assets` 表保留为兼容结构，当前阶段不把它作为推送工作台的必经链路。
 
 - `POST /api/photos/<photo_id>/push`
-  - 生成或复用设备成品。
+  - 按当前参数生成设备成品。
   - 写入 `output/push/latest.bmp`、`latest.png`、`manifest.json`。
   - 写入 `push_history`。
 
@@ -472,22 +470,23 @@ http://192.168.31.115:8766/push/manifest.json
 
 `latest.bmp` 必须满足：
 
-- `800x480`
+- 横框为 `800x480`，竖框为 `480x800`，尺寸均包含底部文字条
 - `RGB`
 - 只包含 PhotoPainter 六色调色板
 - manifest 的 `image_url` 是 `/push/latest.bmp`
+
+> 后续交互决策：推送工作台使用前端 Canvas 即时展示六色构图，不再保留独立的旧式渲染成品预览流程；最终 PNG/BMP 仅在手动推送或定点推送时生成。相框方向与照片旋转分别保存。
 
 ## 开发顺序建议
 
 1. 新增数据库迁移模块和测试。
 2. 建立 `photo_id` 查询兼容层。
 3. 新增 JSON API：状态、照片列表、照片详情。
-4. 新增 `render_assets` 缓存和按需预览 API。
-5. 改造 `push_manager.py` 支持 `photo_id` 和人工覆盖参数。
-6. 新建 `static/app/` 原生前端骨架。
-7. 实现首页状态中控台。
-8. 实现 `/gallery` 瀑布流和排序。
-9. 实现详情页和文案编辑。
-10. 实现 `/push-studio/<photo_id>` 参数版工作台。
-11. 保留旧路由兼容。
-12. 补齐测试、本地运行验证和 NAS/Docker 验收。
+4. 改造 `push_manager.py` 支持 `photo_id` 和人工覆盖参数。
+5. 新建 `static/app/` 原生前端骨架。
+6. 实现首页状态中控台。
+7. 实现 `/gallery` 瀑布流和排序。
+8. 实现详情页和文案编辑。
+9. 实现 `/push-studio/<photo_id>` 工作台和 Canvas 交互。
+10. 保留旧路由兼容。
+11. 补齐测试、本地运行验证和 NAS/Docker 验收。

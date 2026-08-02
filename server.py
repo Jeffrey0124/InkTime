@@ -16,7 +16,14 @@ from typing import Any
 from flask import Flask, abort, jsonify, redirect, request, send_file
 
 from photo_identity import ensure_photo_identity_schema
-from push_manager import PushSettings, ensure_push_schema, publish_render
+from push_manager import (
+    PushSettings,
+    ensure_push_schema,
+    normalize_render_overrides,
+    publish_render,
+    settings_from_config,
+    write_latest_files,
+)
 from render_photopainter import render_from_database
 from web_queries import load_photo, load_photos, load_status
 
@@ -739,6 +746,8 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
             ("模型", photo.get("analysis_channel") or "-"),
         ]
     )
+    ai_side_caption = str(photo.get("ai_side_caption") or "")
+    custom_side_caption = str(photo.get("custom_side_caption") or "")
     return f"""
     <section class="screen photo-detail-screen">
       <div class="detail-page-head">
@@ -772,6 +781,12 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
             <strong>评分理由</strong>
             <div class="muted">{_esc(photo.get("reason"))}</div>
           </div>
+          <section class="detail-caption-editor" data-detail-caption-editor data-save-url="/api/photos/{_esc(photo.get('photo_id'))}/overrides">
+            <h3>文案微调</h3>
+            <p class="small"><strong>AI 原始短文案</strong><br>{_esc(ai_side_caption or '暂无')}</p>
+            <label class="field-stack"><span>人工文案</span><textarea rows="3" data-detail-caption-input>{_esc(custom_side_caption or ai_side_caption)}</textarea></label>
+            <div class="detail-caption-actions"><button class="button" type="button" data-detail-caption-save>保存文案</button><span class="small" data-detail-caption-state aria-live="polite">{_esc('已应用人工覆盖' if custom_side_caption else '当前使用 AI 文案')}</span></div>
+          </section>
         </aside>
       </section>
     </section>
@@ -779,17 +794,27 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
 
 
 def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
+    saved_crop = _json_object(photo.get("manual_crop_json"))
     crop = {
-        "x": 0,
-        "y": 0,
-        "scale": 1,
-        **_json_object(photo.get("manual_crop_json")),
+        "scale": 1.0,
+        "offset_x": saved_crop.get("offset_x", saved_crop.get("x", 0)),
+        "offset_y": saved_crop.get("offset_y", saved_crop.get("y", 0)),
+        "rotation": 0,
+        "fit_mode": "fill",
+        **saved_crop,
     }
     render_overrides = {
         "show_caption": True,
-        "show_date": False,
-        "show_location": False,
-        **_json_object(photo.get("render_overrides_json")),
+        "show_date": True,
+        "show_location": True,
+        "frame_orientation": "landscape",
+        "dither_enabled": True,
+        "dither_type": str(_config_value("DITHER_MODE", "atkinson")),
+        "dither_strength": 1.0,
+        "brightness": float(_config_value("BRIGHTNESS", 1.1)),
+        "contrast": float(_config_value("CONTRAST", 1.2)),
+        "saturation": float(_config_value("SATURATION", 1.2)),
+        **normalize_render_overrides(photo.get("render_overrides_json")),
     }
     caption = str(photo.get("custom_side_caption") or photo.get("side_caption") or "")
     exif_date = str(photo.get("exif_date") or "")
@@ -805,7 +830,7 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
         if part
     )
     return f"""
-    <section class="screen studio-screen" data-push-studio data-photo-id="{_esc(photo.get("photo_id"))}" data-save-url="/api/photos/{_esc(photo.get("photo_id"))}/overrides" data-crop="{_json_attr(crop)}" data-render="{_json_attr(render_overrides)}" data-date="{_esc(exif_date)}" data-location="{_esc(exif_city)}">
+    <section class="screen studio-screen" data-push-studio data-display-defaults-version="2" data-photo-id="{_esc(photo.get("photo_id"))}" data-save-url="/api/photos/{_esc(photo.get("photo_id"))}/overrides" data-push-url="/api/photos/{_esc(photo.get("photo_id"))}/push" data-source-url="{_esc(photo.get("source_url"))}" data-crop="{_json_attr(crop)}" data-render="{_json_attr(render_overrides)}" data-date="{_esc(exif_date)}" data-location="{_esc(exif_city)}">
       <div class="studio-head">
         <div>
         <p class="status-kicker">Push Studio</p>
@@ -817,42 +842,42 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
       <section class="detail-grid studio-workspace">
       <div class="studio-stage-card">
         <div class="device-editor" tabindex="0" data-editor-stage aria-label="推送构图编辑器">
-          <img class="editable-photo" data-editor-image src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
+          <canvas class="editor-canvas" data-editor-canvas width="800" height="480" aria-label="完整设备成品的六色转换预览"></canvas>
+          <div class="editor-loading" data-editor-loading>正在载入原图...</div>
           <div class="editor-safe-frame" aria-hidden="true"></div>
-          <div class="paper-caption editor-caption" data-caption-bar>
-            <span class="paper-caption-text" data-caption-preview>{_esc(caption)}</span>
-            <small data-meta-preview>{_esc(exif_city or exif_date)}</small>
-          </div>
         </div>
-        <p class="stage-hint">鼠标拖动画面调整位置，滚轮缩放；保存后会写入这张照片的人工覆盖参数。</p>
+        <div class="stage-footnote">
+          <p class="stage-hint">拖动原图调整位置，滚轮以光标为中心缩放。六色预览直接使用当前构图，不会先裁切原图。</p>
+          <span class="preview-mode" data-preview-mode>六色预览</span>
+        </div>
       </div>
       <aside class="info-panel studio-controls">
-        <h2>推送准备</h2>
-        <p class="description">先确定这张图的构图和文案；实际六色渲染会在生成预览或推送 latest.bmp 时执行。</p>
-        <label class="field-stack">
-          <span>文案</span>
-          <textarea rows="3" data-caption-input>{_esc(caption)}</textarea>
-        </label>
-        <div class="check-grid" aria-label="显示内容">
-          <label><input type="checkbox" data-toggle-caption {"checked" if render_overrides.get("show_caption") else ""}> 显示文案</label>
-          <label><input type="checkbox" data-toggle-date {"checked" if render_overrides.get("show_date") else ""}> 显示日期</label>
-          <label><input type="checkbox" data-toggle-location {"checked" if render_overrides.get("show_location") else ""}> 显示地点</label>
+        <div class="studio-control-head">
+          <div><p class="status-kicker">Photo Conversion</p><h2>照片转换</h2></div>
+          <label class="preview-switch"><input type="checkbox" data-dither-enabled {"checked" if render_overrides.get("dither_enabled") else ""}><span>六色预览</span></label>
         </div>
-        <label class="range-row wide-range">
-          <span>缩放</span>
-          <input type="range" min="0.6" max="2.8" step="0.01" value="{_esc(crop.get("scale"))}" data-zoom-input>
-          <strong data-zoom-value>1.00</strong>
-        </label>
-        <div class="position-readout">
-          <span>水平 <strong data-pan-x>0</strong></span>
-          <span>垂直 <strong data-pan-y>0</strong></span>
-        </div>
-        <div class="actions">
-          <button class="button" type="button" data-fit-button>适应画面</button>
-          <button class="button" type="button" data-reset-button>重置</button>
-          <button class="primary-button" type="button" data-save-button>保存参数</button>
-          <a class="button" href="/gallery#photo-{_esc(photo.get("photo_id"))}">照片详情</a>
-        </div>
+        <section class="studio-control-section" aria-labelledby="composition-label">
+          <h3 id="composition-label">构图</h3>
+          <div class="select-row"><span>相框摆放</span><div class="frame-orientation-control" aria-label="相框摆放方向"><button class="button" type="button" data-frame-orientation="landscape">横放</button><button class="button" type="button" data-frame-orientation="portrait">竖放</button></div></div>
+          <label class="select-row"><span>适配方式</span><select data-fit-mode><option value="fill" {"selected" if crop.get("fit_mode") == "fill" else ""}>填满画布</option><option value="contain" {"selected" if crop.get("fit_mode") == "contain" else ""}>完整显示</option></select></label>
+          <label class="range-row wide-range"><span>缩放</span><input type="range" min="0.1" max="3" step="0.01" value="{_esc(crop.get("scale"))}" data-zoom-input><strong data-zoom-value>1.00</strong></label>
+          <div class="position-readout"><span>水平 <strong data-pan-x>0</strong></span><span>垂直 <strong data-pan-y>0</strong></span></div>
+          <div class="compact-actions"><button class="button" type="button" data-fit-button>自动适配</button><button class="button" type="button" data-rotate-button>照片旋转 90°</button><button class="button" type="button" data-reset-button>重置</button></div>
+        </section>
+        <section class="studio-control-section" aria-labelledby="render-label">
+          <div class="control-title-row"><h3 id="render-label">六色渲染</h3><button class="text-button" type="button" data-auto-button>自动配置</button></div>
+          <label class="select-row"><span>抖动算法</span><select data-dither-type><option value="atkinson" {"selected" if render_overrides.get("dither_type") == "atkinson" else ""}>PhotoPainter Atkinson（推荐）</option><option value="floyd-steinberg" {"selected" if render_overrides.get("dither_type") == "floyd-steinberg" else ""}>Floyd-Steinberg</option><option value="atkinson-standard" {"selected" if render_overrides.get("dither_type") == "atkinson-standard" else ""}>Atkinson（标准）</option><option value="stucki" {"selected" if render_overrides.get("dither_type") == "stucki" else ""}>Stucki</option><option value="jarvis-judice-ninke" {"selected" if render_overrides.get("dither_type") == "jarvis-judice-ninke" else ""}>Jarvis-Judice-Ninke</option></select></label>
+          <label class="range-row parameter-range"><span>抖动强度</span><input type="range" min="0" max="5" step="0.1" value="{_esc(render_overrides.get("dither_strength"))}" data-dither-strength><strong data-dither-strength-value>1.0</strong></label>
+          <label class="range-row parameter-range"><span>亮度</span><input type="range" min="0.5" max="1.8" step="0.05" value="{_esc(render_overrides.get("brightness"))}" data-brightness><strong data-brightness-value>1.10</strong></label>
+          <label class="range-row parameter-range"><span>对比度</span><input type="range" min="0.5" max="2" step="0.05" value="{_esc(render_overrides.get("contrast"))}" data-contrast><strong data-contrast-value>1.20</strong></label>
+          <label class="range-row parameter-range"><span>饱和度</span><input type="range" min="0" max="2" step="0.05" value="{_esc(render_overrides.get("saturation"))}" data-saturation><strong data-saturation-value>1.20</strong></label>
+        </section>
+        <section class="studio-control-section" aria-labelledby="caption-label">
+          <h3 id="caption-label">文字排版</h3>
+          <label class="field-stack"><span>文案</span><textarea rows="3" data-caption-input>{_esc(caption)}</textarea></label>
+          <div class="check-grid" aria-label="显示内容"><label><input type="checkbox" data-toggle-caption {"checked" if render_overrides.get("show_caption") else ""}> 文案</label><label><input type="checkbox" data-toggle-date {"checked" if render_overrides.get("show_date") else ""}> 日期</label><label><input type="checkbox" data-toggle-location {"checked" if render_overrides.get("show_location") else ""}> 地点</label></div>
+        </section>
+        <div class="studio-primary-actions"><button class="button" type="button" data-save-button>保存参数</button><button class="primary-button" type="button" data-push-button>生成并推送</button></div>
         <p class="save-state" data-save-state aria-live="polite"></p>
       </aside>
       </section>
@@ -914,6 +939,12 @@ def create_app(
     ensure_photo_identity_schema(db)
     ensure_push_schema(db)
 
+    def push_token_error():
+        token = str(_config_value("PUSH_API_TOKEN", "") or "")
+        if token and request.headers.get("X-Push-Token", "") != token:
+            return jsonify({"ok": False, "error": "推送 token 错误或缺失"}), 401
+        return None
+
     @app.get("/")
     def index():
         status = load_status(
@@ -971,6 +1002,13 @@ def create_app(
             }
         )
 
+    @app.get("/api/photos/<int:photo_id>")
+    def api_photo_detail(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None:
+            abort(404)
+        return jsonify({"ok": True, "photo": photo})
+
     @app.get("/api/photos/<int:photo_id>/source")
     def photo_source(photo_id: int):
         photo = load_photo(db, photo_id)
@@ -981,7 +1019,7 @@ def create_app(
             abort(404)
         return send_file(target)
 
-    @app.post("/api/photos/<int:photo_id>/overrides")
+    @app.route("/api/photos/<int:photo_id>/overrides", methods=["POST", "PATCH"])
     def save_photo_overrides(photo_id: int):
         photo = load_photo(db, photo_id)
         if photo is None:
@@ -990,9 +1028,22 @@ def create_app(
         if not isinstance(payload, dict):
             return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
 
-        caption = str(payload.get("custom_side_caption") or "").strip()
-        manual_crop = _json_object(payload.get("manual_crop_json"))
-        render_overrides = _json_object(payload.get("render_overrides_json"))
+        caption = (
+            str(payload.get("custom_side_caption") or "").strip()
+            if "custom_side_caption" in payload
+            else str(photo.get("custom_side_caption") or "").strip()
+        )
+        manual_crop = (
+            _json_object(payload.get("manual_crop_json"))
+            if "manual_crop_json" in payload
+            else _json_object(photo.get("manual_crop_json"))
+        )
+        render_overrides = (
+            _json_object(payload.get("render_overrides_json"))
+            if "render_overrides_json" in payload
+            else _json_object(photo.get("render_overrides_json"))
+        )
+        render_overrides["display_defaults_version"] = 2
         updated_at = _utc_now()
 
         conn = sqlite3.connect(db)
@@ -1029,6 +1080,36 @@ def create_app(
                 "updated_at": updated_at,
             }
         )
+
+    @app.post("/api/photos/<int:photo_id>/push")
+    def push_photo(photo_id: int):
+        auth_error = push_token_error()
+        if auth_error is not None:
+            return auth_error
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        item = dict(photo)
+        item["source_path"] = str(photo.get("path") or "")
+        item["side_caption"] = str(
+            photo.get("custom_side_caption") or photo.get("side_caption") or ""
+        )
+        item["crop_focus"] = _json_object(photo.get("crop_focus_json"))
+        settings = settings_from_config(
+            db_path=db,
+            render_output_dir=render_dir,
+            push_output_dir=push_dir,
+        )
+        try:
+            manifest = write_latest_files(
+                item,
+                settings=settings,
+                trigger_type="manual",
+                note=f"WebUI photo_id={photo_id}",
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "photo_id": photo_id, "manifest": manifest})
 
     @app.get("/photos/<int:photo_id>")
     def photo_detail(photo_id: int):
@@ -1132,9 +1213,9 @@ def create_app(
 
     @app.post("/api/push/manual/<int:item_id>")
     def push_manual(item_id: int):
-        token = str(_config_value("PUSH_API_TOKEN", "") or "")
-        if token and request.headers.get("X-Push-Token", "") != token:
-            return jsonify({"ok": False, "error": "推送 token 错误或缺失"}), 401
+        auth_error = push_token_error()
+        if auth_error is not None:
+            return auth_error
         settings = PushSettings(
             db_path=db,
             render_output_dir=render_dir,

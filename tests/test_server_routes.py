@@ -351,6 +351,13 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertIn(f"/api/photos/{photo['photo_id']}/source", photo["source_url"])
                 photos.close()
 
+                detail_api = client.get(f"/api/photos/{photo['photo_id']}")
+                self.assertEqual(detail_api.status_code, 200)
+                detail_payload = detail_api.get_json()
+                self.assertEqual(detail_payload["photo"]["photo_id"], photo["photo_id"])
+                self.assertEqual(detail_payload["photo"]["ai_side_caption"], "春天在笑")
+                detail_api.close()
+
                 self.assertEqual(status_payload["recent_push"]["photo_id"], photo["photo_id"])
 
                 home = client.get("/")
@@ -361,14 +368,26 @@ class ServerRoutesTests(unittest.TestCase):
 
                 override_payload = {
                     "custom_side_caption": "手掌托起一座小城",
-                    "manual_crop_json": {"x": 18, "y": -9, "scale": 1.35},
+                    "manual_crop_json": {
+                        "offset_x": 18,
+                        "offset_y": -9,
+                        "scale": 1.35,
+                        "rotation": 90,
+                        "fit_mode": "fill",
+                    },
                     "render_overrides_json": {
                         "show_caption": True,
                         "show_date": True,
                         "show_location": False,
+                        "dither_enabled": False,
+                        "dither_type": "stucki",
+                        "dither_strength": 1.4,
+                        "brightness": 1.1,
+                        "contrast": 1.2,
+                        "saturation": 1.2,
                     },
                 }
-                saved = client.post(
+                saved = client.patch(
                     f"/api/photos/{photo['photo_id']}/overrides",
                     json=override_payload,
                 )
@@ -392,13 +411,67 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertEqual(override_row["custom_side_caption"], "手掌托起一座小城")
                 self.assertEqual(json.loads(override_row["manual_crop_json"])["scale"], 1.35)
 
+                caption_only = client.patch(
+                    f"/api/photos/{photo['photo_id']}/overrides",
+                    json={"custom_side_caption": "只修改这一句"},
+                )
+                self.assertEqual(caption_only.status_code, 200)
+                caption_only.close()
+                conn = sqlite3.connect(db_path)
+                preserved = conn.execute(
+                    "SELECT manual_crop_json, render_overrides_json FROM photo_overrides WHERE photo_id = ?",
+                    (photo["photo_id"],),
+                ).fetchone()
+                conn.close()
+                self.assertEqual(json.loads(preserved[0])["scale"], 1.35)
+                self.assertEqual(json.loads(preserved[1])["dither_type"], "stucki")
+
                 studio = client.get(f"/push-studio/{photo['photo_id']}")
                 self.assertEqual(studio.status_code, 200)
                 studio_html = studio.get_data(as_text=True)
                 self.assertIn('data-push-studio', studio_html)
                 self.assertIn('data-save-url=', studio_html)
-                self.assertIn("手掌托起一座小城", studio_html)
+                self.assertIn('data-push-url=', studio_html)
+                self.assertIn('data-editor-canvas', studio_html)
+                self.assertIn("只修改这一句", studio_html)
+                self.assertIn("Jarvis-Judice-Ninke", studio_html)
+                self.assertIn("PhotoPainter Atkinson（推荐）", studio_html)
+                self.assertIn("Atkinson（标准）", studio_html)
+                self.assertIn("自动配置", studio_html)
+                self.assertIn('data-frame-orientation="landscape"', studio_html)
+                self.assertIn('data-frame-orientation="portrait"', studio_html)
+                self.assertIn("照片旋转 90°", studio_html)
                 self.assertIn("保存参数", studio_html)
+                self.assertIn('data-display-defaults-version="2"', studio_html)
+
+                detail = client.get(f"/photos/{photo['photo_id']}")
+                detail_html = detail.get_data(as_text=True)
+                self.assertIn("AI 原始短文案", detail_html)
+                self.assertIn("人工文案", detail_html)
+                self.assertIn("只修改这一句", detail_html)
+                detail.close()
+
+                unauthorized = client.post(f"/api/photos/{photo['photo_id']}/push")
+                self.assertEqual(unauthorized.status_code, 401)
+                unauthorized.close()
+
+                pushed = client.post(
+                    f"/api/photos/{photo['photo_id']}/push",
+                    headers={"X-Push-Token": "secret"},
+                )
+                self.assertEqual(pushed.status_code, 200)
+                pushed_payload = pushed.get_json()
+                self.assertTrue(pushed_payload["ok"])
+                self.assertEqual(pushed_payload["manifest"]["manual_crop"]["rotation"], 90)
+                self.assertEqual(pushed_payload["manifest"]["render_width"], 800)
+                self.assertEqual(pushed_payload["manifest"]["render_height"], 480)
+                self.assertEqual(
+                    pushed_payload["manifest"]["render_overrides"]["dither_type"],
+                    "stucki",
+                )
+                self.assertTrue((push_dir / "latest.bmp").exists())
+                self.assertTrue((push_dir / "latest.png").exists())
+                pushed.close()
 
                 with_missing = client.get("/api/photos?include_missing=1")
                 self.assertEqual(with_missing.status_code, 200)
@@ -409,7 +482,7 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertEqual(gallery.status_code, 200)
                 gallery_html = gallery.get_data(as_text=True)
                 self.assertIn("已分析照片瀑布流", gallery_html)
-                self.assertIn("手掌托起一座小城", gallery_html)
+                self.assertIn("只修改这一句", gallery_html)
                 self.assertIn("加入推送", gallery_html)
                 self.assertIn(f"#photo-{photo['photo_id']}", gallery_html)
                 self.assertIn(f"/push-studio/{photo['photo_id']}", gallery_html)

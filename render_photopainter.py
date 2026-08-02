@@ -77,20 +77,9 @@ def _safe_display_caption(side_caption: str, caption: str, ptype: str) -> str:
 
 
 def _native_location_from_source(source: Path) -> str:
-    try:
-        from analyze_photos import get_city_resolver, read_exif
+    from photo_metadata import read_location_from_source
 
-        info = read_exif(source)
-        lat = info.get("gps_lat")
-        lon = info.get("gps_lon")
-        if lat is None or lon is None:
-            return ""
-        city = get_city_resolver()(float(lat), float(lon))
-        if city:
-            return city
-        return f"{float(lat):.4f}, {float(lon):.4f}"
-    except Exception:
-        return ""
+    return str(read_location_from_source(source).get("display") or "")
 
 
 def _load_rows(db_path: Path, limit: int | None) -> list[dict[str, Any]]:

@@ -22,7 +22,10 @@ pillow_heif.register_heif_opener()
 
 DITHER_NONE = "none"
 DITHER_ATKINSON = "atkinson"
+DITHER_ATKINSON_STANDARD = "atkinson-standard"
 DITHER_FLOYD_STEINBERG = "floyd-steinberg"
+DITHER_STUCKI = "stucki"
+DITHER_JARVIS = "jarvis-judice-ninke"
 
 SIX_COLOR_PALETTE: tuple[tuple[int, int, int], ...] = (
     (0, 0, 0),
@@ -66,32 +69,75 @@ def closest_palette_index(rgb: Iterable[int | float]) -> int:
     return int(np.argmin(total_dist))
 
 
-def quantize_atkinson(image: Image.Image) -> Image.Image:
-    """PhotoPainter 参考实现的 Atkinson 浮点误差扩散。"""
-    img_array = np.array(image.convert("RGB"))
-    height, width, _ = img_array.shape
-    working_img = img_array.astype(np.float32)
+ERROR_DIFFUSION_KERNELS: dict[str, tuple[float, tuple[tuple[int, int, float], ...]]] = {
+    DITHER_FLOYD_STEINBERG: (
+        16.0,
+        ((1, 0, 7), (-1, 1, 3), (0, 1, 5), (1, 1, 1)),
+    ),
+    DITHER_ATKINSON: (
+        8.0,
+        ((1, 0, 1), (-1, 1, 1), (0, 1, 2), (1, 1, 1)),
+    ),
+    DITHER_ATKINSON_STANDARD: (
+        8.0,
+        ((1, 0, 1), (2, 0, 1), (-1, 1, 1), (0, 1, 1), (1, 1, 1), (0, 2, 1)),
+    ),
+    DITHER_STUCKI: (
+        42.0,
+        (
+            (1, 0, 8), (2, 0, 4),
+            (-2, 1, 2), (-1, 1, 4), (0, 1, 8), (1, 1, 4), (2, 1, 2),
+            (-2, 2, 1), (-1, 2, 2), (0, 2, 4), (1, 2, 2), (2, 2, 1),
+        ),
+    ),
+    DITHER_JARVIS: (
+        48.0,
+        (
+            (1, 0, 7), (2, 0, 5),
+            (-2, 1, 3), (-1, 1, 5), (0, 1, 7), (1, 1, 5), (2, 1, 3),
+            (-2, 2, 1), (-1, 2, 3), (0, 2, 5), (1, 2, 3), (2, 2, 1),
+        ),
+    ),
+}
+
+
+def quantize_error_diffusion(
+    image: Image.Image,
+    *,
+    algorithm: str,
+    strength: float = 1.0,
+) -> Image.Image:
+    """使用 FrameFilm 同组误差扩散矩阵转换为 PhotoPainter 六色图。"""
+    if algorithm not in ERROR_DIFFUSION_KERNELS:
+        raise ValueError(f"不支持的误差扩散算法: {algorithm}")
+    divisor, kernel = ERROR_DIFFUSION_KERNELS[algorithm]
+    working = np.array(image.convert("RGB"), dtype=np.float32)
+    height, width, _ = working.shape
+    strength = _clamp(float(strength), 0.0, 5.0)
 
     for y in range(height):
         for x in range(width):
-            old_pixel = working_img[y, x].copy()
-            idx = closest_palette_index(tuple(np.clip(old_pixel, 0, 255).astype(int)))
-            new_pixel = np.array(SIX_COLOR_PALETTE[idx], dtype=np.float32)
-            working_img[y, x] = new_pixel
+            old_pixel = np.clip(working[y, x], 0, 255)
+            index = closest_palette_index(old_pixel)
+            new_pixel = PALETTE_ARRAY[index]
+            working[y, x] = new_pixel
+            error = (old_pixel - new_pixel) * strength
+            for offset_x, offset_y, weight in kernel:
+                target_x = x + offset_x
+                target_y = y + offset_y
+                if 0 <= target_x < width and target_y < height:
+                    working[target_y, target_x] += error * (weight / divisor)
 
-            error = old_pixel - new_pixel
+    return Image.fromarray(np.clip(working, 0, 255).astype(np.uint8), mode="RGB")
 
-            if x + 1 < width:
-                working_img[y, x + 1] += error * (1 / 8)
-            if y + 1 < height:
-                if x - 1 >= 0:
-                    working_img[y + 1, x - 1] += error * (1 / 8)
-                working_img[y + 1, x] += error * (1 / 4)
-                if x + 1 < width:
-                    working_img[y + 1, x + 1] += error * (1 / 8)
 
-    quantized_array = np.clip(working_img, 0, 255).astype(np.uint8)
-    return Image.fromarray(quantized_array)
+def quantize_atkinson(image: Image.Image, strength: float = 1.0) -> Image.Image:
+    """PhotoPainter 原版的前向四邻点 Atkinson 误差扩散。"""
+    return quantize_error_diffusion(
+        image,
+        algorithm=DITHER_ATKINSON,
+        strength=strength,
+    )
 
 
 def _make_photopainter_palette() -> Image.Image:
@@ -338,6 +384,49 @@ def fit_to_photopainter_canvas(
     raise ValueError("mode 必须是 'scale' 或 'cut'")
 
 
+def fit_manual_transform_to_canvas(
+    image: Image.Image,
+    *,
+    width: int,
+    height: int,
+    scale: float = 1.0,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+    rotation: int = 0,
+    fit_mode: str = "fill",
+) -> Image.Image:
+    """把完整原图绘制进固定画布，再由画布边界完成裁切。
+
+    `scale=1` 表示自动填充或完整适应后的基准大小；偏移量使用最终画布像素，
+    因而 WebUI 的 800x432 坐标可以直接复用于最终推送渲染。
+    """
+    source = ImageOps.exif_transpose(image).convert("RGB")
+    normalized_rotation = int(rotation or 0) % 360
+    if normalized_rotation not in {0, 90, 180, 270}:
+        raise ValueError("rotation 必须是 0、90、180 或 270")
+    if normalized_rotation:
+        source = source.rotate(-normalized_rotation, expand=True, resample=Image.Resampling.BICUBIC)
+
+    source_width, source_height = source.size
+    fit_mode = str(fit_mode or "fill").lower()
+    if fit_mode == "fill":
+        base_scale = max(width / source_width, height / source_height)
+    elif fit_mode == "contain":
+        base_scale = min(width / source_width, height / source_height)
+    else:
+        raise ValueError("fit_mode 必须是 'fill' 或 'contain'")
+
+    total_scale = base_scale * _clamp(float(scale), 0.1, 5.0)
+    resized_width = max(1, int(round(source_width * total_scale)))
+    resized_height = max(1, int(round(source_height * total_scale)))
+    resized = source.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
+    left = int(round((width - resized_width) / 2 + float(offset_x)))
+    top = int(round((height - resized_height) / 2 + float(offset_y)))
+    canvas = Image.new("RGB", (width, height), (255, 255, 255))
+    canvas.paste(resized, (left, top))
+    return canvas
+
+
 def enhance_for_eink(
     image: Image.Image,
     *,
@@ -354,21 +443,28 @@ def enhance_for_eink(
     return enhanced_image.filter(ImageFilter.SHARPEN)
 
 
-def quantize_six_color(image: Image.Image, dither: str) -> Image.Image:
+def quantize_six_color(
+    image: Image.Image,
+    dither: str,
+    *,
+    strength: float = 1.0,
+) -> Image.Image:
     dither = (dither or DITHER_ATKINSON).lower()
-    if dither == DITHER_ATKINSON:
-        return quantize_atkinson(image).convert("RGB")
-    if dither == DITHER_FLOYD_STEINBERG:
-        return image.quantize(
-            dither=Image.Dither.FLOYDSTEINBERG,
-            palette=_make_photopainter_palette(),
-        ).convert("RGB")
+    if dither in ERROR_DIFFUSION_KERNELS:
+        return quantize_error_diffusion(
+            image,
+            algorithm=dither,
+            strength=strength,
+        )
     if dither == DITHER_NONE:
         return image.quantize(
             dither=Image.Dither.NONE,
             palette=_make_photopainter_palette(),
         ).convert("RGB")
-    raise ValueError("dither 必须是 'atkinson'、'floyd-steinberg' 或 'none'")
+    raise ValueError(
+        "dither 必须是 'atkinson'、'atkinson-standard'、'floyd-steinberg'、"
+        "'stucki'、'jarvis-judice-ninke' 或 'none'"
+    )
 
 
 def _load_text_font(font_path: str | Path | None, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -503,6 +599,7 @@ def render_photopainter_image(
     height: int = 432,
     mode: str = "scale",
     dither: str = DITHER_ATKINSON,
+    dither_strength: float = 1.0,
     brightness: float = 1.1,
     contrast: float = 1.2,
     saturation: float = 1.2,
@@ -545,7 +642,7 @@ def render_photopainter_image(
         contrast=contrast,
         saturation=saturation,
     )
-    rendered = quantize_six_color(enhanced, dither)
+    rendered = quantize_six_color(enhanced, dither, strength=dither_strength)
     rendered.save(output)
 
     if save_bmp:

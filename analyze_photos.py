@@ -739,6 +739,66 @@ def read_exif(path: Path) -> dict:
     return info
 
 
+def backfill_existing_location_metadata(conn: sqlite3.Connection, city_resolver) -> int:
+    """为当前扫描目录内的旧分析记录补齐 GPS 和城市，不重新调用 AI。"""
+    rows = conn.execute(
+        """
+        SELECT s.path, s.exif_json
+        FROM photo_scores s
+        JOIN _temp_existing_paths t ON t.path = s.path
+        WHERE COALESCE(s.exif_city, '') = ''
+          AND COALESCE(s.location_hint, '') = ''
+        """
+    ).fetchall()
+    updated = 0
+
+    def optional_float(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    for source_path, raw_exif in rows:
+        try:
+            exif_data = json.loads(str(raw_exif or "{}"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            exif_data = {}
+        if not isinstance(exif_data, dict):
+            exif_data = {}
+
+        info = read_exif(Path(str(source_path)))
+        lat = optional_float(info.get("gps_lat"))
+        lon = optional_float(info.get("gps_lon"))
+        alt = optional_float(info.get("gps_alt"))
+        if lat is None or lon is None:
+            continue
+
+        city = city_resolver(lat, lon) or ""
+        display = city or f"{lat:.4f}, {lon:.4f}"
+        exif_data.update({"gps_lat": lat, "gps_lon": lon, "gps_alt": alt})
+        conn.execute(
+            """
+            UPDATE photo_scores
+            SET exif_json = ?, exif_gps_lat = ?, exif_gps_lon = ?, exif_gps_alt = ?,
+                exif_city = ?, location_hint = ?
+            WHERE path = ?
+            """,
+            (
+                json.dumps(exif_data, ensure_ascii=False, default=str),
+                lat,
+                lon,
+                alt,
+                display,
+                display,
+                str(source_path),
+            ),
+        )
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
 def in_home(lat: float | None, lon: float | None) -> bool:
     """判断是否在“本地/常驻地”范围内。"""
     if lat is None or lon is None:
@@ -1585,6 +1645,13 @@ def main():
     except Exception as e:
         # 清理失败不应影响主流程
         print(f"[WARN] 同步清理数据库残留记录失败（已忽略，不影响主流程）：{e}")
+
+    try:
+        location_updates = backfill_existing_location_metadata(conn, city_resolver)
+        if location_updates:
+            print(f"[INFO] 已为 {location_updates} 张旧照片补齐 GPS/地点信息。")
+    except Exception as e:
+        print(f"[WARN] 旧照片 GPS/地点补齐失败（已忽略，不影响主流程）：{e}")
 
     cur_test = conn.cursor()
     # 只统计当前 IMAGE_DIR 下的已分析照片，避免数据库里其它路径/历史残留影响进度计算

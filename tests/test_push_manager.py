@@ -10,6 +10,7 @@ from PIL import Image
 from photopainter_renderer import SIX_COLOR_PALETTE
 from push_manager import (
     PushSettings,
+    build_push_image,
     ensure_push_schema,
     publish_render,
     publish_scheduled,
@@ -95,6 +96,64 @@ def _settings(root: Path) -> PushSettings:
 
 
 class PushManagerTests(unittest.TestCase):
+    def test_render_override_defaults_do_not_replace_saved_false_values(self):
+        from push_manager import normalize_render_overrides
+
+        normalized = normalize_render_overrides(
+            {"show_caption": False, "show_date": False, "show_location": False}
+        )
+
+        self.assertFalse(normalized["show_caption"])
+        self.assertFalse(normalized["show_date"])
+        self.assertFalse(normalized["show_location"])
+
+    def test_photo_rotation_does_not_change_landscape_frame(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.png"
+            Image.new("RGB", (640, 480), (220, 80, 40)).save(source)
+            settings = _settings(root)
+            item = {
+                "source_path": str(source),
+                "manual_crop_json": json.dumps(
+                    {"scale": 1, "offset_x": 0, "offset_y": 0, "rotation": 90, "fit_mode": "fill"}
+                ),
+                "render_overrides_json": json.dumps(
+                    {"dither_enabled": False, "show_caption": False, "show_date": False, "show_location": False}
+                ),
+            }
+
+            rendered = build_push_image(item, settings)
+
+            self.assertEqual(rendered.size, (800, 480))
+            self.assertEqual(rendered.getpixel((400, 432)), (255, 255, 255))
+
+    def test_portrait_frame_uses_double_height_bottom_caption_bar(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.png"
+            Image.new("RGB", (640, 480), (220, 80, 40)).save(source)
+            settings = _settings(root)
+            item = {
+                "source_path": str(source),
+                "side_caption": "A short caption",
+                "exif_city": "Shanghai",
+                "exif_date": "2026-08-03",
+                "manual_crop_json": json.dumps(
+                    {"scale": 1, "offset_x": 0, "offset_y": 0, "rotation": 90, "fit_mode": "fill"}
+                ),
+                "render_overrides_json": json.dumps(
+                    {"frame_orientation": "portrait", "dither_enabled": True}
+                ),
+            }
+
+            rendered = build_push_image(item, settings)
+
+            self.assertEqual(rendered.size, (480, 800))
+            self.assertLessEqual(set(rendered.getdata()), set(SIX_COLOR_PALETTE))
+            caption_pixels = list(rendered.crop((0, 704, 480, 800)).getdata())
+            self.assertIn((0, 0, 0), caption_pixels)
+
     def test_manual_publish_writes_bmp_png_manifest_and_history(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

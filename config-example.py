@@ -61,6 +61,7 @@ FINAL_RENDER_HEIGHT = 480
 CAPTION_BAR_HEIGHT = 48
 RENDER_ORIENTATION = "landscape"
 RENDER_MODE = "scale"
+# PhotoPainter 原版前向 Atkinson，适合照片和人像，作为默认推荐算法。
 DITHER_MODE = "atkinson"
 BRIGHTNESS = 1.1
 CONTRAST = 1.2

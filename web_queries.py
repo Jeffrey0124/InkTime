@@ -11,6 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from photo_metadata import coordinate_label, read_location_from_source
 from render_photopainter import _extract_exif_date, _safe_display_caption
 
 
@@ -186,6 +187,7 @@ def load_photos(
     sort: str = "score",
     include_missing: bool = False,
     random_seed: str | None = None,
+    photo_id: int | None = None,
 ) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
@@ -204,6 +206,11 @@ def load_photos(
         analysis_model_expr = _optional_column(score_columns, "analysis_model")
         crop_focus_expr = _optional_column(score_columns, "crop_focus_json")
         exif_json_expr = _optional_column(score_columns, "exif_json")
+        exif_gps_lat_expr = _optional_column(score_columns, "exif_gps_lat", "NULL")
+        exif_gps_lon_expr = _optional_column(score_columns, "exif_gps_lon", "NULL")
+        exif_gps_alt_expr = _optional_column(score_columns, "exif_gps_alt", "NULL")
+        where_clause = "WHERE p.id = ?" if photo_id is not None else ""
+        query_params = (photo_id,) if photo_id is not None else ()
 
         rows = conn.execute(
             f"""
@@ -218,6 +225,9 @@ def load_photos(
                    s.beauty_score,
                    s.reason,
                    {exif_json_expr},
+                   {exif_gps_lat_expr},
+                   {exif_gps_lon_expr},
+                   {exif_gps_alt_expr},
                    {side_caption_expr},
                    {exif_city_expr},
                    {location_hint_expr},
@@ -241,7 +251,9 @@ def load_photos(
               FROM render_assets
               GROUP BY photo_id
             ) ra ON ra.photo_id = p.id
+            {where_clause}
             """
+            , query_params
         ).fetchall()
     finally:
         conn.close()
@@ -255,6 +267,9 @@ def load_photos(
         ai_side_caption = _safe_display_caption(str(row["side_caption"] or ""), caption, ptype)
         final_caption = str(row["custom_side_caption"] or ai_side_caption)
         combined_score = _score(row["memory_score"], row["beauty_score"])
+        stored_location = row["exif_city"] or row["location_hint"] or ""
+        if not stored_location:
+            stored_location = coordinate_label(row["exif_gps_lat"], row["exif_gps_lon"])
         photos.append(
             {
                 "photo_id": int(row["photo_id"]),
@@ -269,8 +284,12 @@ def load_photos(
                 "beauty_score": row["beauty_score"],
                 "score": combined_score,
                 "reason": row["reason"] or "",
+                "exif_json": row["exif_json"] or "",
                 "exif_date": _extract_exif_date(row["exif_json"]),
-                "exif_city": row["exif_city"] or row["location_hint"] or "",
+                "exif_city": stored_location,
+                "exif_gps_lat": row["exif_gps_lat"],
+                "exif_gps_lon": row["exif_gps_lon"],
+                "exif_gps_alt": row["exif_gps_alt"],
                 "analysis_channel": row["analysis_channel"] or "",
                 "analysis_model": row["analysis_model"] or "",
                 "crop_focus_json": row["crop_focus_json"] or "",
@@ -295,12 +314,30 @@ def load_photos(
     else:
         photos.sort(key=lambda item: (float(item["score"]), item["path"]), reverse=True)
 
-    return photos[:limit]
+    selected = photos[:limit]
+    _hydrate_missing_locations(selected)
+    return selected
+
+
+def _hydrate_missing_locations(photos: list[dict[str, Any]]) -> None:
+    candidates = [
+        photo
+        for photo in photos
+        if not photo.get("exif_city") and photo.get("exists_on_disk") and photo.get("path")
+    ]
+    if not candidates:
+        return
+
+    for photo in candidates:
+        metadata = read_location_from_source(str(photo["path"]))
+        if not metadata.get("display"):
+            continue
+        photo["exif_city"] = str(metadata["display"])
+        photo["exif_gps_lat"] = metadata.get("lat")
+        photo["exif_gps_lon"] = metadata.get("lon")
+        photo["exif_gps_alt"] = metadata.get("alt")
 
 
 def load_photo(db_path: Path, photo_id: int) -> dict[str, Any] | None:
-    photos = load_photos(db_path, limit=100000, include_missing=True)
-    for photo in photos:
-        if photo["photo_id"] == photo_id:
-            return photo
-    return None
+    photos = load_photos(db_path, limit=1, include_missing=True, photo_id=photo_id)
+    return photos[0] if photos else None

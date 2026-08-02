@@ -6,10 +6,16 @@ from PIL import Image
 
 from photopainter_renderer import (
     DITHER_ATKINSON,
+    DITHER_ATKINSON_STANDARD,
     DITHER_FLOYD_STEINBERG,
+    DITHER_JARVIS,
+    DITHER_STUCKI,
     SIX_COLOR_PALETTE,
+    ERROR_DIFFUSION_KERNELS,
     _compute_cover_crop_box,
+    fit_manual_transform_to_canvas,
     fit_to_photopainter_canvas,
+    quantize_six_color,
     render_photopainter_image,
 )
 
@@ -55,6 +61,45 @@ class PhotoPainterRendererTests(unittest.TestCase):
             self.assertEqual(rendered.size, (800, 432))
             colors = set(rendered.getdata())
             self.assertLessEqual(colors, set(SIX_COLOR_PALETTE))
+
+    def test_framefilm_dither_algorithms_all_output_six_colors(self):
+        source = Image.linear_gradient("L").resize((48, 32)).convert("RGB")
+
+        for algorithm in (
+            DITHER_FLOYD_STEINBERG,
+            DITHER_ATKINSON,
+            DITHER_ATKINSON_STANDARD,
+            DITHER_STUCKI,
+            DITHER_JARVIS,
+        ):
+            with self.subTest(algorithm=algorithm):
+                rendered = quantize_six_color(source, algorithm, strength=1.3)
+                self.assertEqual(rendered.size, source.size)
+                self.assertLessEqual(set(rendered.getdata()), set(SIX_COLOR_PALETTE))
+
+    def test_default_atkinson_keeps_photopainter_forward_kernel(self):
+        divisor, kernel = ERROR_DIFFUSION_KERNELS[DITHER_ATKINSON]
+
+        self.assertEqual(divisor, 8.0)
+        self.assertEqual(kernel, ((1, 0, 1), (-1, 1, 1), (0, 1, 2), (1, 1, 1)))
+
+    def test_manual_transform_scales_the_full_source_before_canvas_crop(self):
+        source = Image.new("RGB", (200, 100), (255, 0, 0))
+        for x in range(100, 200):
+            for y in range(100):
+                source.putpixel((x, y), (0, 0, 255))
+
+        rendered = fit_manual_transform_to_canvas(
+            source,
+            width=100,
+            height=100,
+            scale=0.5,
+            fit_mode="fill",
+        )
+
+        self.assertEqual(rendered.getpixel((50, 5)), (255, 255, 255))
+        self.assertEqual(rendered.getpixel((20, 50)), (255, 0, 0))
+        self.assertEqual(rendered.getpixel((80, 50)), (0, 0, 255))
 
     def test_reference_scale_mode_fills_and_crops_to_canvas(self):
         source = Image.new("RGB", (100, 100), (10, 20, 30))
