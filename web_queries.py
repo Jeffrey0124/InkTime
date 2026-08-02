@@ -78,6 +78,27 @@ def _load_push_manifest(push_dir: Path) -> dict[str, Any]:
         return {}
 
 
+def _photo_id_for_path(db_path: Path, source_path: str) -> int | None:
+    if not source_path:
+        return None
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _table_exists(conn, "photos"):
+            return None
+        row = conn.execute(
+            """
+            SELECT id FROM photos
+            WHERE path = ?
+            LIMIT 1
+            """,
+            (source_path,),
+        ).fetchone()
+        return int(row["id"]) if row is not None else None
+    finally:
+        conn.close()
+
+
 def load_status(db_path: Path, *, monitor_dir: Path, push_dir: Path) -> dict[str, Any]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -130,11 +151,13 @@ def load_status(db_path: Path, *, monitor_dir: Path, push_dir: Path) -> dict[str
             "note": "",
         }
     if recent_push is not None:
+        source_path = str(recent_push.get("source_path") or "")
         recent_push.update(
             {
                 "image_url": manifest.get("image_url", "/push/latest.bmp") if manifest else "",
                 "preview_url": manifest.get("preview_url", "/push/latest.png") if manifest else "",
                 "side_caption": manifest.get("side_caption", "") if manifest else "",
+                "photo_id": _photo_id_for_path(db_path, source_path),
             }
         )
 

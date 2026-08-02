@@ -459,9 +459,11 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
     preview_url = str(recent_push.get("preview_url") or "")
     recent_time = str(recent_push.get("pushed_at") or "暂无推送")
     recent_caption = str(recent_push.get("side_caption") or recent_push.get("source_path") or "还没有设备成品")
+    recent_photo_id = recent_push.get("photo_id")
+    recent_studio_href = f"/push-studio/{_esc(recent_photo_id)}" if recent_photo_id else "/push-studio"
     state_label = "分析完成" if status.get("analyzed_photos") else "等待分析"
     state_copy = (
-        f"{_esc(status.get('analyzed_photos'))} 张照片已入库，可以生成设备预览"
+        f"{_esc(status.get('analyzed_photos'))} 张照片已入库，可以进入画廊筛选"
         if status.get("analyzed_photos")
         else "还没有已分析照片，先完成扫描与 AI 分析"
     )
@@ -476,7 +478,7 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
           <div>
             <strong>{_esc(recent_caption)}</strong>
             <p>{_esc(recent_time)}</p>
-            <a class="ghost-button compact" href="/push-studio">进入工作台</a>
+            <a class="ghost-button compact" href="{recent_studio_href}">调整这张图</a>
           </div>
         </div>
         """
@@ -536,10 +538,8 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
           <button class="dock-action primary" type="button">开始 / 暂停分析</button>
           <a class="dock-action" href="/api/status">重新扫描照片库</a>
           <button class="dock-action" type="button">停止分析</button>
-          <a class="dock-action" href="/renders">立即生成预览</a>
           <a class="dock-action" href="/gallery">进入画廊</a>
           <a class="dock-action" href="/settings">模型设置</a>
-          <a class="dock-action" href="/renders">打开输出目录</a>
         </div>
 
         <article class="latest-push" aria-label="最近推送">
@@ -585,8 +585,13 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
         for value, label in sort_options
     )
     cards: list[str] = []
+    modals: list[str] = []
+    photo_ids = [int(photo["photo_id"]) for photo in photos if photo.get("photo_id") is not None]
     for index, photo in enumerate(photos):
+        photo_id = int(photo.get("photo_id"))
         score = _fmt_score(photo.get("score"))
+        memory = _fmt_score(photo.get("memory_score"))
+        beauty = _fmt_score(photo.get("beauty_score"))
         meta = " · ".join(
             part
             for part in [
@@ -596,17 +601,68 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
             ]
             if part
         )
+        meta_items = "".join(
+            f"<li><strong>{_esc(label)}</strong><span>{_esc(value)}</span></li>"
+            for label, value in [
+                ("类型", photo.get("type") or "未分类"),
+                ("日期", photo.get("exif_date") or "-"),
+                ("地点", photo.get("exif_city") or "-"),
+                ("模型", photo.get("analysis_channel") or "-"),
+            ]
+        )
+        prev_id = photo_ids[index - 1] if index > 0 and index - 1 < len(photo_ids) else photo_ids[-1]
+        next_id = photo_ids[index + 1] if index + 1 < len(photo_ids) else photo_ids[0]
         shape = " tall" if index % 5 in {0, 4} else " wide" if index % 5 == 2 else ""
         cards.append(
             f"""
             <article class="photo-card{shape}" tabindex="0">
-              <a class="push-float" href="/push-studio/{_esc(photo.get("photo_id"))}">加入推送</a>
-              <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}" loading="lazy">
+              <a class="push-float" href="/push-studio/{_esc(photo_id)}">加入推送</a>
+              <a class="photo-image-link" href="#photo-{_esc(photo_id)}" aria-label="打开照片详情">
+                <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}" loading="lazy">
+              </a>
               <div class="photo-copy">
                 <div class="score-pair"><span>{_esc(score)}</span><small>综合分</small></div>
                 <h3>{_esc(photo.get("side_caption"))}</h3>
                 <p class="small">{_esc(meta or "暂无日期/地点")}</p>
-                <p class="small"><a href="/photos/{_esc(photo.get("photo_id"))}">查看详情</a></p>
+              </div>
+            </article>
+            """
+        )
+        modals.append(
+            f"""
+            <article class="photo-lightbox" id="photo-{_esc(photo_id)}" role="dialog" aria-modal="true" aria-labelledby="photo-title-{_esc(photo_id)}">
+              <a class="lightbox-backdrop" href="#gallery-title" aria-label="关闭详情"></a>
+              <div class="lightbox-card">
+                <a class="lightbox-close" href="#gallery-title" aria-label="关闭详情">×</a>
+                <a class="lightbox-arrow prev" href="#photo-{_esc(prev_id)}" aria-label="上一张">‹</a>
+                <a class="lightbox-arrow next" href="#photo-{_esc(next_id)}" aria-label="下一张">›</a>
+                <p class="lightbox-label">Photo #{_esc(photo_id)}</p>
+                <div class="lightbox-grid">
+                  <figure class="lightbox-preview">
+                    <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
+                    <figcaption>{_esc(photo.get("side_caption"))}</figcaption>
+                    <ul class="detail-meta-strip">{meta_items}</ul>
+                  </figure>
+                  <aside class="lightbox-analysis">
+                    <h2 id="photo-title-{_esc(photo_id)}">AI 分析</h2>
+                    <p class="description">{_esc(photo.get("caption"))}</p>
+                    <div class="score-row">
+                      <span class="muted">回忆度</span>
+                      <div class="bar"><span style="--value: {_score_width(photo.get("memory_score"))}%"></span></div>
+                      <strong>{_esc(memory)}</strong>
+                    </div>
+                    <div class="score-row">
+                      <span class="muted">美观度</span>
+                      <div class="bar"><span style="--value: {_score_width(photo.get("beauty_score"))}%"></span></div>
+                      <strong>{_esc(beauty)}</strong>
+                    </div>
+                    <div class="reason">
+                      <strong>评分理由</strong>
+                      <div class="muted">{_esc(photo.get("reason"))}</div>
+                    </div>
+                    <a class="primary-button push-entry" href="/push-studio/{_esc(photo_id)}">进入推送工作台</a>
+                  </aside>
+                </div>
               </div>
             </article>
             """
@@ -636,6 +692,7 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
         </form>
       </div>
       <section class="masonry" aria-label="照片列表">{"".join(cards)}</section>
+      {"".join(modals)}
     </section>
     """
 
@@ -651,58 +708,76 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
         ]
         if part
     )
+    meta_items = "".join(
+        f"<li><strong>{_esc(label)}</strong><span>{_esc(value)}</span></li>"
+        for label, value in [
+            ("类型", photo.get("type") or "未分类"),
+            ("日期", photo.get("exif_date") or "-"),
+            ("地点", photo.get("exif_city") or "-"),
+            ("模型", photo.get("analysis_channel") or "-"),
+        ]
+    )
     return f"""
-    <section class="hero">
-      <div>
-        <p class="status-kicker">Photo #{_esc(photo.get("photo_id"))}</p>
-        <h1>{_esc(photo.get("side_caption") or "未命名照片")}</h1>
-        <p class="lead">{_esc(meta or "暂无日期/地点")}</p>
-      </div>
-      <div class="stats">
-        <a class="button" href="/gallery">返回画廊</a>
-        <a class="button primary-button" href="/push-studio/{_esc(photo.get("photo_id"))}">进入推送工作台</a>
-      </div>
-    </section>
-    <section class="detail-grid">
-      <div class="preview-panel">
-        <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
-        <div class="paper-caption"><span class="paper-caption-text">{_esc(photo.get("side_caption"))}</span></div>
-      </div>
-      <aside class="info-panel">
-        <h2>AI 分析</h2>
-        <p class="description">{_esc(photo.get("caption"))}</p>
-        <div class="score-row">
-          <span class="muted">回忆度</span>
-          <div class="bar"><span style="--value: {_score_width(photo.get("memory_score"))}%"></span></div>
-          <strong>{_esc(_fmt_score(photo.get("memory_score")))}</strong>
+    <section class="screen photo-detail-screen">
+      <div class="detail-page-head">
+        <span class="status-kicker">Photo #{_esc(photo.get("photo_id"))}</span>
+        <div class="actions">
+          <a class="button" href="/gallery">返回画廊</a>
+          <a class="primary-button" href="/push-studio/{_esc(photo.get("photo_id"))}">进入推送工作台</a>
         </div>
-        <div class="score-row">
-          <span class="muted">美观度</span>
-          <div class="bar"><span style="--value: {_score_width(photo.get("beauty_score"))}%"></span></div>
-          <strong>{_esc(_fmt_score(photo.get("beauty_score")))}</strong>
+      </div>
+      <section class="detail-grid">
+        <div class="preview-panel">
+          <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
+          <div class="paper-caption"><span class="paper-caption-text">{_esc(photo.get("side_caption"))}</span></div>
+          <ul class="detail-meta-strip">{meta_items}</ul>
         </div>
-        <div class="reason">
-          <strong>评分理由</strong>
-          <div class="muted">{_esc(photo.get("reason"))}</div>
-        </div>
-      </aside>
+        <aside class="info-panel">
+          <h2>AI 分析</h2>
+          <p class="small">{_esc(meta or "暂无日期/地点")}</p>
+          <p class="description">{_esc(photo.get("caption"))}</p>
+          <div class="score-row">
+            <span class="muted">回忆度</span>
+            <div class="bar"><span style="--value: {_score_width(photo.get("memory_score"))}%"></span></div>
+            <strong>{_esc(_fmt_score(photo.get("memory_score")))}</strong>
+          </div>
+          <div class="score-row">
+            <span class="muted">美观度</span>
+            <div class="bar"><span style="--value: {_score_width(photo.get("beauty_score"))}%"></span></div>
+            <strong>{_esc(_fmt_score(photo.get("beauty_score")))}</strong>
+          </div>
+          <div class="reason">
+            <strong>评分理由</strong>
+            <div class="muted">{_esc(photo.get("reason"))}</div>
+          </div>
+        </aside>
+      </section>
     </section>
     """
 
 
 def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
+    meta = " · ".join(
+        part
+        for part in [
+            f"Photo #{photo.get('photo_id')}",
+            str(photo.get("exif_date") or ""),
+            str(photo.get("exif_city") or ""),
+            str(photo.get("type") or "未分类"),
+        ]
+        if part
+    )
     return f"""
-    <section class="hero">
-      <div>
+    <section class="screen studio-screen">
+      <div class="studio-head">
+        <div>
         <p class="status-kicker">Push Studio</p>
-        <h1>{_esc(photo.get("side_caption") or "单张推送工作台")}</h1>
-        <p class="lead">完整构图、文案微调和设备一致预览将在后续任务实现；当前入口已按 photo_id 对齐。</p>
-      </div>
-      <div class="stats">
+          <h2>单张推送工作台</h2>
+          <p class="small">{_esc(meta)}</p>
+        </div>
         <a class="button" href="/gallery">返回画廊</a>
       </div>
-    </section>
-    <section class="detail-grid">
+      <section class="detail-grid studio-workspace">
       <div class="preview-panel">
         <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
         <div class="paper-caption"><span class="paper-caption-text">{_esc(photo.get("side_caption"))}</span></div>
@@ -711,10 +786,10 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
         <h2>推送准备</h2>
         <p class="description">这张照片已经可以作为后续推送工作台的输入。</p>
         <div class="actions">
-          <a class="button" href="/photos/{_esc(photo.get("photo_id"))}">查看详情</a>
-          <a class="button" href="/renders">旧渲染成品</a>
+          <a class="button" href="/gallery#photo-{_esc(photo.get("photo_id"))}">照片详情</a>
         </div>
       </aside>
+      </section>
     </section>
     """
 

@@ -351,6 +351,14 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertIn(f"/api/photos/{photo['photo_id']}/source", photo["source_url"])
                 photos.close()
 
+                self.assertEqual(status_payload["recent_push"]["photo_id"], photo["photo_id"])
+
+                home = client.get("/")
+                self.assertEqual(home.status_code, 200)
+                home_html = home.get_data(as_text=True)
+                self.assertIn(f'href="/push-studio/{photo["photo_id"]}"', home_html)
+                self.assertIn("调整这张图", home_html)
+
                 with_missing = client.get("/api/photos?include_missing=1")
                 self.assertEqual(with_missing.status_code, 200)
                 self.assertEqual(len(with_missing.get_json()["photos"]), 2)
@@ -362,7 +370,9 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertIn("已分析照片瀑布流", gallery_html)
                 self.assertIn("春天在笑", gallery_html)
                 self.assertIn("加入推送", gallery_html)
-                self.assertIn(f"/photos/{photo['photo_id']}", gallery_html)
+                self.assertIn(f"#photo-{photo['photo_id']}", gallery_html)
+                self.assertIn(f"/push-studio/{photo['photo_id']}", gallery_html)
+                self.assertNotIn("查看详情", gallery_html)
 
                 source = client.get(f"/api/photos/{photo['photo_id']}/source")
                 self.assertEqual(source.status_code, 200)

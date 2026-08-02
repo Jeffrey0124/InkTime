@@ -16,6 +16,10 @@
   --deep-shadow: 0 28px 80px rgba(39, 48, 42, 0.18);
 }
 
+* {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
   color: var(--ink);
@@ -533,12 +537,13 @@ input {
   top: 14px;
   right: 14px;
   z-index: 2;
-  min-height: 40px;
-  padding: 9px 16px;
+  min-height: 44px;
+  padding: 10px 20px;
   border: 0;
   border-radius: 999px;
   background: var(--push-red);
   color: #fff;
+  font-size: 15px;
   font-weight: 850;
   box-shadow: 0 12px 28px rgba(231, 47, 76, .28);
   opacity: 0;
@@ -560,6 +565,22 @@ input {
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0) scale(1);
+}
+
+.photo-card:hover .push-float:hover,
+.push-float:focus-visible {
+  transform: translateY(-1px) scale(1);
+  box-shadow: 0 16px 36px rgba(231, 47, 76, .34);
+}
+
+.photo-image-link {
+  display: block;
+  cursor: zoom-in;
+}
+
+.photo-image-link:focus-visible {
+  outline: 3px solid rgba(38, 169, 108, .55);
+  outline-offset: -3px;
 }
 
 .photo-card img {
@@ -588,6 +609,161 @@ input {
 .photo-copy h3,
 .photo-card-copy .caption {
   max-width: calc(100% - 70px);
+}
+
+body:has(.photo-lightbox:target) {
+  overflow: hidden;
+}
+
+.photo-lightbox {
+  display: none;
+}
+
+.photo-lightbox:target {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 26px;
+}
+
+.lightbox-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(18, 22, 19, .56);
+}
+
+.lightbox-card {
+  position: relative;
+  z-index: 1;
+  width: min(1420px, calc(100vw - 84px));
+  max-height: calc(100vh - 52px);
+  overflow: auto;
+  padding: clamp(26px, 4vw, 58px);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 34px 92px rgba(9, 12, 10, .34);
+}
+
+.lightbox-label {
+  margin: 0 0 24px;
+  color: var(--green-dark);
+  font-weight: 850;
+}
+
+.lightbox-grid {
+  display: grid;
+  grid-template-columns: minmax(520px, 1fr) minmax(340px, 420px);
+  gap: clamp(28px, 4vw, 48px);
+  align-items: start;
+}
+
+.lightbox-preview {
+  margin: 0;
+  min-width: 0;
+}
+
+.lightbox-preview img {
+  display: block;
+  width: 100%;
+  max-height: min(66vh, 760px);
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--soft);
+}
+
+.lightbox-preview figcaption {
+  margin-top: 10px;
+  color: var(--ink);
+  font-family: "KaiTi", "STKaiti", "Microsoft YaHei", serif;
+}
+
+.detail-meta-strip {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+  max-width: 520px;
+  margin: 28px 0 0;
+  padding: 0;
+  color: var(--muted);
+}
+
+.detail-meta-strip li {
+  display: grid;
+  gap: 2px;
+}
+
+.detail-meta-strip strong {
+  color: var(--green-dark);
+  font-size: 12px;
+}
+
+.lightbox-analysis {
+  display: grid;
+  align-content: start;
+  min-height: min(64vh, 720px);
+  padding-top: clamp(20px, 5vh, 54px);
+}
+
+.lightbox-analysis h2 {
+  margin-bottom: 10px;
+  font-size: clamp(34px, 4vw, 54px);
+  line-height: 1;
+}
+
+.lightbox-analysis .description {
+  max-width: 40em;
+  color: #30382f;
+}
+
+.push-entry {
+  justify-self: end;
+  margin-top: clamp(28px, 14vh, 132px);
+}
+
+.lightbox-close,
+.lightbox-arrow {
+  position: fixed;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, .82);
+}
+
+.lightbox-close {
+  top: 14px;
+  left: 18px;
+  width: 34px;
+  height: 34px;
+  font-size: 30px;
+  line-height: 1;
+}
+
+.lightbox-arrow {
+  top: 50%;
+  width: 46px;
+  height: 76px;
+  transform: translateY(-50%);
+  font-size: 54px;
+  font-weight: 200;
+}
+
+.lightbox-arrow.prev {
+  left: 56px;
+}
+
+.lightbox-arrow.next {
+  right: 56px;
+}
+
+.lightbox-close:hover,
+.lightbox-close:focus-visible,
+.lightbox-arrow:hover,
+.lightbox-arrow:focus-visible {
+  color: #fff;
+  outline: 0;
 }
 
 .score-pair,
@@ -629,9 +805,41 @@ input {
   min-width: 0;
 }
 
+.photo-detail-screen {
+  padding-top: 22px;
+}
+
+.detail-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.studio-screen {
+  padding-top: 22px;
+}
+
+.studio-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.studio-head h2 {
+  font-size: clamp(24px, 2.6vw, 34px);
+}
+
+.studio-workspace {
+  margin-top: 8px;
+}
+
 .preview-panel {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 48px;
+  grid-template-rows: minmax(0, 1fr) 48px auto;
   aspect-ratio: 5 / 3;
   overflow: hidden;
   border: 0;
@@ -657,6 +865,15 @@ input {
   color: #1c211b;
   font-family: "KaiTi", "STKaiti", "Microsoft YaHei", serif;
   overflow: hidden;
+}
+
+.preview-panel .detail-meta-strip {
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  max-width: none;
+  margin: 0;
+  padding: 14px 16px 16px;
+  background: #fbfcf9;
 }
 
 .score-row {
@@ -759,6 +976,20 @@ td {
     grid-template-columns: 1fr;
   }
 
+  .lightbox-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .lightbox-analysis {
+    min-height: 0;
+    padding-top: 0;
+  }
+
+  .push-entry {
+    justify-self: start;
+    margin-top: 22px;
+  }
+
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -789,6 +1020,25 @@ td {
   .workspace {
     padding: 20px 14px 48px;
     overflow: hidden;
+  }
+
+  .photo-lightbox:target {
+    padding: 16px 10px;
+  }
+
+  .lightbox-card {
+    width: min(100%, calc(100vw - 20px));
+    max-height: calc(100vh - 32px);
+    padding: 22px 16px;
+  }
+
+  .lightbox-arrow {
+    display: none;
+  }
+
+  .detail-meta-strip,
+  .preview-panel .detail-meta-strip {
+    grid-template-columns: 1fr;
   }
 
   .topbar,
