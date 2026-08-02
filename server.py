@@ -9,6 +9,7 @@ import html
 import json
 import re
 import sqlite3
+import datetime as dt
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,26 @@ def _score_width(value: Any) -> int:
         return max(0, min(100, round(float(value))))
     except (TypeError, ValueError):
         return 0
+
+
+def _json_attr(value: Any) -> str:
+    return html.escape(json.dumps(value, ensure_ascii=False), quote=True)
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def _short_path(value: Any) -> str:
@@ -267,6 +288,7 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
       syncDetailPanels();
     }})();
   </script>
+  <script src="/static/app.js"></script>
 </body>
 </html>"""
 
@@ -757,6 +779,21 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
 
 
 def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
+    crop = {
+        "x": 0,
+        "y": 0,
+        "scale": 1,
+        **_json_object(photo.get("manual_crop_json")),
+    }
+    render_overrides = {
+        "show_caption": True,
+        "show_date": False,
+        "show_location": False,
+        **_json_object(photo.get("render_overrides_json")),
+    }
+    caption = str(photo.get("custom_side_caption") or photo.get("side_caption") or "")
+    exif_date = str(photo.get("exif_date") or "")
+    exif_city = str(photo.get("exif_city") or "")
     meta = " · ".join(
         part
         for part in [
@@ -768,7 +805,7 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
         if part
     )
     return f"""
-    <section class="screen studio-screen">
+    <section class="screen studio-screen" data-push-studio data-photo-id="{_esc(photo.get("photo_id"))}" data-save-url="/api/photos/{_esc(photo.get("photo_id"))}/overrides" data-crop="{_json_attr(crop)}" data-render="{_json_attr(render_overrides)}" data-date="{_esc(exif_date)}" data-location="{_esc(exif_city)}">
       <div class="studio-head">
         <div>
         <p class="status-kicker">Push Studio</p>
@@ -778,16 +815,45 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
         <a class="button" href="/gallery">返回画廊</a>
       </div>
       <section class="detail-grid studio-workspace">
-      <div class="preview-panel">
-        <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
-        <div class="paper-caption"><span class="paper-caption-text">{_esc(photo.get("side_caption"))}</span></div>
+      <div class="studio-stage-card">
+        <div class="device-editor" tabindex="0" data-editor-stage aria-label="推送构图编辑器">
+          <img class="editable-photo" data-editor-image src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
+          <div class="editor-safe-frame" aria-hidden="true"></div>
+          <div class="paper-caption editor-caption" data-caption-bar>
+            <span class="paper-caption-text" data-caption-preview>{_esc(caption)}</span>
+            <small data-meta-preview>{_esc(exif_city or exif_date)}</small>
+          </div>
+        </div>
+        <p class="stage-hint">鼠标拖动画面调整位置，滚轮缩放；保存后会写入这张照片的人工覆盖参数。</p>
       </div>
-      <aside class="info-panel">
+      <aside class="info-panel studio-controls">
         <h2>推送准备</h2>
-        <p class="description">这张照片已经可以作为后续推送工作台的输入。</p>
+        <p class="description">先确定这张图的构图和文案；实际六色渲染会在生成预览或推送 latest.bmp 时执行。</p>
+        <label class="field-stack">
+          <span>文案</span>
+          <textarea rows="3" data-caption-input>{_esc(caption)}</textarea>
+        </label>
+        <div class="check-grid" aria-label="显示内容">
+          <label><input type="checkbox" data-toggle-caption {"checked" if render_overrides.get("show_caption") else ""}> 显示文案</label>
+          <label><input type="checkbox" data-toggle-date {"checked" if render_overrides.get("show_date") else ""}> 显示日期</label>
+          <label><input type="checkbox" data-toggle-location {"checked" if render_overrides.get("show_location") else ""}> 显示地点</label>
+        </div>
+        <label class="range-row wide-range">
+          <span>缩放</span>
+          <input type="range" min="0.6" max="2.8" step="0.01" value="{_esc(crop.get("scale"))}" data-zoom-input>
+          <strong data-zoom-value>1.00</strong>
+        </label>
+        <div class="position-readout">
+          <span>水平 <strong data-pan-x>0</strong></span>
+          <span>垂直 <strong data-pan-y>0</strong></span>
+        </div>
         <div class="actions">
+          <button class="button" type="button" data-fit-button>适应画面</button>
+          <button class="button" type="button" data-reset-button>重置</button>
+          <button class="primary-button" type="button" data-save-button>保存参数</button>
           <a class="button" href="/gallery#photo-{_esc(photo.get("photo_id"))}">照片详情</a>
         </div>
+        <p class="save-state" data-save-state aria-live="polite"></p>
       </aside>
       </section>
     </section>
@@ -914,6 +980,55 @@ def create_app(
         if not target.exists() or not target.is_file():
             abort(404)
         return send_file(target)
+
+    @app.post("/api/photos/<int:photo_id>/overrides")
+    def save_photo_overrides(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None:
+            abort(404)
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+
+        caption = str(payload.get("custom_side_caption") or "").strip()
+        manual_crop = _json_object(payload.get("manual_crop_json"))
+        render_overrides = _json_object(payload.get("render_overrides_json"))
+        updated_at = _utc_now()
+
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                """
+                INSERT INTO photo_overrides
+                (photo_id, custom_side_caption, manual_crop_json, render_overrides_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(photo_id) DO UPDATE SET
+                  custom_side_caption = excluded.custom_side_caption,
+                  manual_crop_json = excluded.manual_crop_json,
+                  render_overrides_json = excluded.render_overrides_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    photo_id,
+                    caption or None,
+                    json.dumps(manual_crop, ensure_ascii=False, sort_keys=True),
+                    json.dumps(render_overrides, ensure_ascii=False, sort_keys=True),
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return jsonify(
+            {
+                "ok": True,
+                "photo_id": photo_id,
+                "custom_side_caption": caption,
+                "manual_crop_json": manual_crop,
+                "render_overrides_json": render_overrides,
+                "updated_at": updated_at,
+            }
+        )
 
     @app.get("/photos/<int:photo_id>")
     def photo_detail(photo_id: int):

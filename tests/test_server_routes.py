@@ -359,6 +359,47 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertIn(f'href="/push-studio/{photo["photo_id"]}"', home_html)
                 self.assertIn("调整这张图", home_html)
 
+                override_payload = {
+                    "custom_side_caption": "手掌托起一座小城",
+                    "manual_crop_json": {"x": 18, "y": -9, "scale": 1.35},
+                    "render_overrides_json": {
+                        "show_caption": True,
+                        "show_date": True,
+                        "show_location": False,
+                    },
+                }
+                saved = client.post(
+                    f"/api/photos/{photo['photo_id']}/overrides",
+                    json=override_payload,
+                )
+                self.assertEqual(saved.status_code, 200)
+                saved_payload = saved.get_json()
+                self.assertTrue(saved_payload["ok"])
+                self.assertEqual(saved_payload["custom_side_caption"], "手掌托起一座小城")
+                saved.close()
+
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                override_row = conn.execute(
+                    """
+                    SELECT custom_side_caption, manual_crop_json, render_overrides_json
+                    FROM photo_overrides
+                    WHERE photo_id = ?
+                    """,
+                    (photo["photo_id"],),
+                ).fetchone()
+                conn.close()
+                self.assertEqual(override_row["custom_side_caption"], "手掌托起一座小城")
+                self.assertEqual(json.loads(override_row["manual_crop_json"])["scale"], 1.35)
+
+                studio = client.get(f"/push-studio/{photo['photo_id']}")
+                self.assertEqual(studio.status_code, 200)
+                studio_html = studio.get_data(as_text=True)
+                self.assertIn('data-push-studio', studio_html)
+                self.assertIn('data-save-url=', studio_html)
+                self.assertIn("手掌托起一座小城", studio_html)
+                self.assertIn("保存参数", studio_html)
+
                 with_missing = client.get("/api/photos?include_missing=1")
                 self.assertEqual(with_missing.status_code, 200)
                 self.assertEqual(len(with_missing.get_json()["photos"]), 2)
@@ -368,7 +409,7 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertEqual(gallery.status_code, 200)
                 gallery_html = gallery.get_data(as_text=True)
                 self.assertIn("已分析照片瀑布流", gallery_html)
-                self.assertIn("春天在笑", gallery_html)
+                self.assertIn("手掌托起一座小城", gallery_html)
                 self.assertIn("加入推送", gallery_html)
                 self.assertIn(f"#photo-{photo['photo_id']}", gallery_html)
                 self.assertIn(f"/push-studio/{photo['photo_id']}", gallery_html)

@@ -837,6 +837,123 @@ body:has(.photo-lightbox:target) {
   margin-top: 8px;
 }
 
+.studio-stage-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.device-editor {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 48px;
+  aspect-ratio: 5 / 3;
+  overflow: hidden;
+  border-radius: 16px;
+  background: #fbfcf9;
+  box-shadow: var(--deep-shadow);
+  outline: 1px solid var(--line);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.device-editor.dragging {
+  cursor: grabbing;
+}
+
+.device-editor:focus-visible {
+  outline: 3px solid rgba(38, 169, 108, .45);
+  outline-offset: 3px;
+}
+
+.editable-photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: translate(var(--pan-x, 0), var(--pan-y, 0)) scale(var(--zoom, 1));
+  transform-origin: center;
+  will-change: transform;
+}
+
+.editor-safe-frame {
+  position: absolute;
+  inset: 16px;
+  bottom: 64px;
+  border: 1px dashed rgba(255, 255, 255, .72);
+  box-shadow: 0 0 0 999px rgba(0, 0, 0, .08);
+  pointer-events: none;
+}
+
+.editor-caption {
+  position: relative;
+  z-index: 1;
+}
+
+.studio-controls {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.field-stack {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 760;
+}
+
+.field-stack textarea {
+  min-height: 92px;
+}
+
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.check-grid label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 8px 9px;
+  border-radius: 10px;
+  background: var(--soft);
+  color: var(--ink);
+  font-weight: 760;
+}
+
+.wide-range {
+  grid-template-columns: 48px minmax(0, 1fr) 52px;
+  margin-top: 0;
+}
+
+.position-readout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.position-readout span {
+  min-height: 34px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+.position-readout strong {
+  color: var(--ink);
+}
+
+.save-state {
+  min-height: 22px;
+  margin: 0;
+  color: var(--green-dark);
+}
+
 .preview-panel {
   display: grid;
   grid-template-rows: minmax(0, 1fr) 48px auto;
@@ -1038,6 +1155,11 @@ td {
 
   .detail-meta-strip,
   .preview-panel .detail-meta-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .check-grid,
+  .position-readout {
     grid-template-columns: 1fr;
   }
 
