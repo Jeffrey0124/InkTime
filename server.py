@@ -22,6 +22,7 @@ from push_manager import (
     normalize_render_overrides,
     publish_render,
     settings_from_config,
+    timezone_from_name,
     write_latest_files,
 )
 from render_photopainter import render_from_database
@@ -972,11 +973,16 @@ def create_app(
     def gallery():
         sort = str(request.args.get("sort", "score"))
         limit = min(200, max(1, int(request.args.get("limit", 60))))
+        today = dt.datetime.now(
+            timezone_from_name(str(_config_value("PUSH_TIMEZONE", "Asia/Shanghai")))
+        ).date()
         photos = load_photos(
             db,
             limit=limit,
             sort=sort,
-            random_seed=str(request.args.get("seed") or ""),
+            random_seed=request.args.get("seed"),
+            exclude_days=int(_config_value("PUSH_EXCLUDE_DAYS", 90)),
+            today=today,
         )
         return _page(
             "InkTime 画廊",
@@ -989,6 +995,9 @@ def create_app(
         sort = str(request.args.get("sort", "score"))
         limit = min(200, max(1, int(request.args.get("limit", 60))))
         include_missing = request.args.get("include_missing") in {"1", "true", "yes"}
+        today = dt.datetime.now(
+            timezone_from_name(str(_config_value("PUSH_TIMEZONE", "Asia/Shanghai")))
+        ).date()
         return jsonify(
             {
                 "ok": True,
@@ -997,7 +1006,9 @@ def create_app(
                     limit=limit,
                     sort=sort,
                     include_missing=include_missing,
-                    random_seed=str(request.args.get("seed") or ""),
+                    random_seed=request.args.get("seed"),
+                    exclude_days=int(_config_value("PUSH_EXCLUDE_DAYS", 90)),
+                    today=today,
                 ),
             }
         )
