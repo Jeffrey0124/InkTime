@@ -6,6 +6,7 @@ __pycache__/
 
 # Virtual environment
 venv/
+.venv/
 
 # IDE
 .idea/
@@ -22,12 +23,16 @@ config.py
 # Outputs
 output/
 
+# Local sample inputs
+sample_photos/
+
 # Database
 filelist.txt
 .filelist_cache.txt
 *.db
 
 # Logs
+*.log
 
 # Others
 test/

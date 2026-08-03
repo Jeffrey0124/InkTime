@@ -1,265 +1,182 @@
-# InkTime · 墨水屏回忆相框
+# InkTime PhotoPainter Local
 
-**中文** | [English](README.en.md)
+本仓库是 InkTime 的纯软件复刻版：用少量测试照片跑通“AI 分析图片 -> SQLite 入库 -> PhotoPainter 7.3 寸 Spectra 6 六色渲染 -> 本地浏览器查看成品图”的闭环。
 
-<p align="left">
-  <img src="esp32/InkTime.jpeg" width="80%">
-</p>
+它不包含任何硬件、烧录、下载或刷屏逻辑。输出目标是浏览器可查看的 `PNG`，可选同时保存 `BMP`。
 
-InkTime 是一个「拉回你相册里的记忆」的墨水屏电子相框项目。
+## 工作流
 
-它不会随机展示照片，也不是简单的按时间轴播放，而是：
+1. `analyze_photos.py`
+   扫描本地相册，调用 OpenAI-compatible 视觉模型，生成描述、评分和一句话文案，写入 `photos.db`。
 
-- 用 AI 理解每一张照片在「拍什么」
-- 给照片按照「值得回忆度」、「美观度」打分
-- 写一句灵光一现的旁白文案
-- 每天从「历史上的今天」里选出**最值得被再次看到的照片**
-- 推送到 ESP32 墨水屏上展示
+2. `render_photopainter.py`
+   从 `photo_scores` 读取高分照片，按 PhotoPainter 7.3 寸 Spectra 6 屏幕风格渲染为六色图片。
 
----
-## 项目整体结构
+3. `server.py`
+   提供本地 WebUI：
+   - `http://127.0.0.1:8766/renders` 查看渲染成品
+   - `http://127.0.0.1:8766/review` 查看分析结果
 
-InkTime 分为三部分：
-
-1. **照片分析（Python）**  
-   扫描相册 → 调用视觉模型 → 分类 / 评分 / 写文案 → 存入数据库
-
-
-2. **图片渲染（Python）**  
-   从数据库里选出「历史上的今天」高分照片 → 渲染成 ESP32 可直接显示的 `.bin`
-
-
-3. **下载与展示（ESP32）**  
-   ESP32 定时从服务器拉取 `.bin` → 刷新墨水屏 → 深度休眠直至下次唤醒
-
----
 ## 环境准备
 
-### 1）Python
 推荐 Python 3.10+。
 
-建议使用虚拟环境：
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item config-example.py config.py
+```
+
+把 10-30 张测试图片放进 `sample_photos/`，然后按你的 VLM 服务修改 `config.py` 里的 `API_CHANNELS`。
+
+## 配置重点
+
+`config.py` 默认只面向本地软件流程：
+
+```python
+IMAGE_DIR = "./sample_photos"
+DB_PATH = "./photos.db"
+RENDER_OUTPUT_DIR = "./output/photopainter"
+RENDER_WIDTH = 800
+RENDER_HEIGHT = 432
+FINAL_RENDER_HEIGHT = 480
+CAPTION_BAR_HEIGHT = 48
+RENDER_MODE = "scale"
+DITHER_MODE = "atkinson"
+BRIGHTNESS = 1.1
+CONTRAST = 1.2
+SATURATION = 1.2
+DAILY_PHOTO_QUANTITY = 5
+```
+
+### 双通道视觉模型
+
+`API_CHANNELS` 按顺序尝试。当前推荐保留两路：
+
+```python
+API_CHANNELS = [
+    {
+        "name": "local_lmstudio",
+        "api_url": "http://127.0.0.1:9100",
+        "api_key": "",
+        "model_name": "google/gemma-4-31b-qat:2",
+        "timeout": 60,
+    },
+    {
+        "name": "cloud_qwen",
+        "api_url": "https://你的云端地址/compatible-mode/v1/chat/completions",
+        "api_key": "从环境变量或本地 config.py 读取",
+        "model_name": "qwen3-vl-plus",
+        "timeout": 600,
+    },
+]
+```
+
+运行逻辑：
+
+- 每张图先请求 `local_lmstudio`。
+- `api_url` 可以填 LM Studio 的根地址，例如 `http://127.0.0.1:9100`，程序会自动补成 `/v1/chat/completions`。
+- `model_name` 必须和 LM Studio 的 `/v1/models` 返回的 `id` 一致；如果只加载了 `google/gemma-4-12b-qat`，就不要填 `google/gemma-4-31b-qat`。
+- 本地模型不可用、超过该通道 `timeout`、HTTP 错误或主分析 JSON 缺字段/分数不可解析时，自动请求 `cloud_qwen`。
+- 数据库会记录 `analysis_channel` 和 `analysis_model`。
+- `/renders`、`/renders/<id>` 和 `/review` 会展示这张图实际由哪个通道分析。
+
+渲染调色板为 PhotoPainter / Spectra 6 六色：黑、白、黄、红、蓝、绿。默认按参考项目使用 `scale` 模式和 Atkinson dithering；也可把 `DITHER_MODE` 改为 `floyd-steinberg`。
+
+注意：最终成品包含底部文字条。默认横框为 800x480（图像区 800x432、文字条 800x48）；推送工作台切换竖框后为 480x800（图像区 480x704、文字条 480x96）。照片旋转只改变图像内容，不改变相框方向。这里的 `scale` / `cut` 沿用参考项目语义，`scale` 会填满图像区并按主体裁切，`cut` 会保留完整画面并用白边补齐。
+
+### 智能裁切
+
+`scale` 模式现在不是简单居中裁切，而是按以下优先级决定裁切窗口：
+
+1. `analyze_photos.py` 在识别照片时要求视觉模型输出 `crop_focus`，即主体/人脸/宠物脸/关键内容的相对坐标。
+2. `render_photopainter.py` 读取数据库中的 `crop_focus_json`，渲染时尽量让该区域完整留在 800x432 图像区内。
+3. 如果没有模型裁切范围，则尝试用 OpenCV 检测人脸并保住人脸。
+4. 如果以上都没有结果，才退回居中裁切。
+
+裁切算法会在不裁掉主体的前提下，尽量把主体中心放到黄金分割附近；多人合影会优先保住所有关键人脸。
+
+## 运行
+
+先启动你的本地或云端 VLM 服务，然后运行：
+
+```powershell
+python analyze_photos.py -j 1 --debug
+python render_photopainter.py
+python server.py
+```
+
+打开：
+
+```text
+http://127.0.0.1:8766/renders
+```
+
+渲染产物位于：
+
+```text
+output/photopainter/
+```
+
+主要文件：
+
+- `render_000.png`, `render_001.png`, ...
+- `latest.png`
+- `manifest.json`
+- 可选 `render_000.bmp`, `latest.bmp`
+
+## 自动推送
+
+推送给墨水屏设备的成品图固定为 BMP：
+
+- 设备下载：`http://127.0.0.1:8766/push/latest.bmp`
+- 浏览器预览：`http://127.0.0.1:8766/push/latest.png`
+- 发布状态：`http://127.0.0.1:8766/push/manifest.json`
+
+在推送工作台点击“生成并推送”会按相框方向生成完整横框 `800x480` 或竖框 `480x800` 成品图。整个成品（包括底部文字条）统一经过六色抖动。如果设置了 `PUSH_API_TOKEN`，手动推送需要输入 token；设备下载 BMP 不需要鉴权。
+
+自动推送使用独立进程，便于未来 Docker 拆分为 `web` 和 `scheduler`：
+
+```powershell
+python scheduler.py
+python scheduler.py --run-once --slot 07:00
+```
+
+详细设计见 `docs/push-strategy.md`。
+
+## 飞牛 NAS Docker 部署
+
+推荐使用 Docker Compose 的双容器形态：
+
+- `web`：运行 `python server.py`，提供 WebUI 和 `/push/latest.bmp`。
+- `scheduler`：运行 `python scheduler.py`，负责定时自动推送。
+- `worker`：不常驻，只用于按需执行分析、渲染和单次推送测试。
+
+快速命令：
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+cp .env.example .env
+docker compose build
+docker compose up -d web scheduler
+docker compose run --rm worker analyze_photos.py -j 1 --debug
+docker compose run --rm worker render_photopainter.py
+docker compose run --rm worker scheduler.py --run-once --slot 07:00
 ```
 
-### 2）安装 exiftool（可选）
-InkTime 可以在不装 exiftool 的情况下运行，但不一定能完整地获取 EXIF 中的 GPS 信息。
+NAS 容器内不能用 `127.0.0.1` 访问你电脑上的 LM Studio。本地模型地址请在 `.env` 里改成电脑的局域网固定 IP，例如 `http://192.168.1.50:9100/v1/chat/completions`。
 
-建议使用 exiftool 获取 GPS 信息：  
+完整部署说明见 `docs/docker-deployment.md`。
 
-macOS(Homebrew): ```brew install exiftool```  
-Linux: ```sudo apt-get install -y libimage-exiftool-perl```
+## 测试
 
-### 3) 配置 config.py
-```
-cp config-example.py config.py  
-vi config.py
-```
-必须配置以下字段：  
-照片库路径 ```IMAGE_DIR```  
-VLM 模型接口 ```API_CHANNELS```  
-InkTime 使用 OpenAI 接口（LM Studio / 其它兼容服务均可）。
-
-为防止照片隐私泄露，建议修改 ```DOWNLOAD_KEY```，为 ESP32 下载路径加一个随机前缀作为密钥。   
-同时，请同步修改 ```esp32/ink-display-7C-photo/ink-display-7C-photo.ino``` 固件中的 ```DAILY_PHOTO_PATH_PREFIX``` 字段。  
-注意，这不是“加密”，只是一个简单的验证路径口令。公网部署建议加 HTTPS/反代鉴权，或只允许内网访问。
-
-## 分析照片
-分析照片前，请先确保：
-- LM Studio（或你的云端 VLM 服务）已启动
-- config.py 已正确配置
-
-执行：
-
-```python3 analyze_photos.py```
-
-视觉大模型会读取并理解相册目录中的所有文件，为每张照片生成：
-
-- 画面描述
-- 照片类型
-- 值得回忆度 / 画面美观度评分
-- 一句话文案
-
-图片数据会保存在 ```photos.db``` 中（SQLite 数据库）。
-
-请自行修改```analyze_photos.py```中的提示词，以调整模型的评价标准和文案风格。
-
-程序可以断点续跑，已处理过的照片信息不会重复分析。你可以分几天分析完你的整个相册。
-
-*请根据你拥有的算力选择合适的模型，作者使用的 qwen3-vl-30b 已经能取得相当不错的文案。*
-
-常用参数：
-
-```bash
-python3 analyze_photos.py -j 4
-python3 analyze_photos.py --debug
-python3 analyze_photos.py --cache
+```powershell
+python -m unittest discover -v
+python -c "import flask, PIL, pillow_heif, numpy; print('ok')"
 ```
 
-- ```-j```, ```--concurrency```：并发处理线程数，默认 `1`。本地模型或多渠道接口吞吐足够时可适当调大。
-- ```--debug```：请求失败时打印请求体和响应体，便于排查接口兼容性或返回格式问题。
-- ```--cache```：使用上次缓存过的相册文件列表，可防止每次跑模型都重复扫描相册目录。仅在相册首次全量分析时打开，勿在生产环境中使用，否则相册新增照片不会被发现，已删除的照片也不会从数据库中清除。
+## 说明
 
-
-## 为 ESP32 渲染「历史上的今天」照片
-执行：
-
-```python3 render_daily_photo.py```
-
-## 启动 ESP32 下载服务器和 WebUI
-执行：
-
-```python3 server.py```
-
-#### WebUI（如果开启）：
-Server 将提供一个简明的可视化前端，用于查看已处理照片的描述、文案，并预览模拟墨水屏渲染效果。
-
-在浏览器中访问：
-
-```http://127.0.0.1:8765/review```
-
-程序跑通后，建议在 ```config.py``` 中关闭 WebUI，仅保留 ESP32 下载接口。
-
-## 服务器部署与定时任务示例（可选）
-
-创建 systemd 服务：
-
-```sudo vi /etc/systemd/system/inktime-server.service```
-
-示例（请自行修改项目路径）：
-
-```
-[Unit]
-Description=InkTime Server
-After=network.target
-
-[Service]
-Type=simple
-# 改成你的项目路径
-WorkingDirectory=/path/to/InkTime
-ExecStart=/path/to/InkTime/venv/bin/python server.py
-Restart=always
-RestartSec=3
-User=inktime
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```
-sudo systemctl daemon-reload
-sudo systemctl enable inktime-server
-sudo systemctl start inktime-server
-```
-
-使用 crontab 每天凌晨自动选片、渲染：
-
-```
-chmod +x scripts/daily_render.sh
-sudo -u inktime crontab -e
-0 5 * * * /path/to/InkTime/scripts/daily_render.sh
-```
-
-在 ```logs/render.log``` 可查看日志。
-
----
-
-# ESP32 墨水屏硬件部分
-
-## 硬件与引脚
-#### 主控
-本项目使用乐鑫 ESP32-S3-N8R8 模块。  
-当然，你也可以使用任何成品 ESP32 开发板进行制作。  
-如使用其它开发板或模块，请注意选择带 PSRAM 的型号（需至少 384K PSRAM）。  
-#### 屏幕
-本项目使用 7.3 寸四色墨水屏，型号为 EL073TS3（49-pin）。使用 GxEPD2 库驱动（GxEPD2_730c_GDEY073D46）。  
-其它尺寸、型号请自行参照 GxEPD2 库中的硬件支持列表修改构造函数。
-#### 墨水屏转接板
-本项目使用 B 站「记得带马扎」制作的七色 EPD 墨水屏转接板（49-pin）。  
-但市面上的大部分 24-pin 墨水屏搭配 SPI 转接板亦可兼容。
-
-#### 引脚定义
-墨水屏使用 SPI 通信，本项目默认引脚为：
-- `PIN_EPD_BUSY = 14`
-- `PIN_EPD_RST  = 13`
-- `PIN_EPD_DC   = 12`
-- `PIN_EPD_CS   = 11`
-- `PIN_EPD_SCLK = 10`
-- `PIN_EPD_DIN  = 9`
-
-### 主板焊接
-原理图、BOM清单、制板文件均位于```esp32/pcb```文件夹中。  
-原理图中的 H1 - H6 为测试焊盘引出，无需焊接真实器件：
-- H1: UART 串口
-- H2: USB
-- H3: BOOT引脚，烧录固件时需将改引脚短接到 GND 后上电
-- H4: 焊接至 EPD 墨水屏转接板
-- H5: 3.7V 电池焊盘
-- H6: 5V 输入测试焊盘
-
-建议使用 UART 串口烧录固件。R2、R3、C5、C6 供 USB 使用，如无需要，可留空不焊。
-
-SW1：RESET 键，按下后会重启设备，并从服务器拉取、显示图片一次。RESET 键可将设备从长休眠状态中唤醒。  
-SW2：WiFi 重置键，按住 SW2 再按下 SW1，ESP32 重启后会清空 NVS，以重新配置 WiFi 连接。  
-SW3 / SW4: 备用 GPIO，以防未来需要添加的功能。如无需要，可留空不焊。
-
-完整 PCB 板示例：
-
-<p align="left">
-  <img src="esp32/pcb/pcb.jpeg" width="80%">
-</p>
-
-## 编译与烧录
-
-建议使用 Arduino IDE。
-
-1. 安装 ESP32 Arduino Core。
-2. 选择开发板：ESP32-S3（必须开启 PSRAM）。
-3. 安装依赖库：
-   - `GxEPD2`
-4. 打开并编译/烧录 `esp32/ink-display-7C-photo/ink-display-7C-photo.ino`。
-
-### 自定义字体（可选）
-如需使用自定义中文字体，可放入 ```resource/fonts/``` 中，并在 ```config.py``` 中声明。
-
-## 首次配置
-
-设备启动时，会尝试从 NVS 读取已保存的 Wi-Fi 配置；若未配置或 Wi-Fi 连接失败，会自动进入 AP 配置模式：
-
-- 设备会开启 AP 热点：`InkTime-xxxx`
-- 默认密码：`12345678`
-- 连接 AP ，用浏览器访问配置页面：`http://192.168.4.1/`
-- 配置 Wi-Fi、服务器地址、定时更新时间并保存，设备会自动重启并进入正常工作流程。
-
-## 刷新与休眠
-
-- 设备每天会在配置的更新时间，从服务器拉取一次当日生成的图片，并刷新墨水屏。
-- 成功刷新后，会进入 Deep Sleep，直到下一次被唤醒。
-- 若下载超时（默认 60s），也会进入长休眠，避免异常耗电。
-- 在任意时候，按下 RESET 键，会强制重启并马上拉取、刷新一次图片。
-- 长休眠待机电流 ＜ 1mA，如使用 2 节 18650 电池，5000mAh 约可实现半年续航。
-
-## 相关项目
-- ESP32 固件依赖 GxEPD2 © ZinggJM（GPL-3.0）：https://github.com/ZinggJM/GxEPD2  
-  如对外分发编译后的固件，请同时遵守 GPL-3.0。
-
-
-- 项目中的离线中文城市名索引，基于 GeoNames 数据制作：  
-GeoNames © GeoNames contributors, CC BY 4.0  
-https://www.geonames.org/
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=dai-hongtao%2FInkTime&type=timeline&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&theme=dark&legend=top-left&sealed_token=HAI4jmHzHVGv8Uh0H_8VWsV5YN3XWswbvR7vPn2uIU6XrZ5W-5rk1eIRv89n40g4u7dMavrdOkLqmVFXdZ0km-oO5vbUivWBRMph0-5SwHSSRLgU3fNSy-4bsdH_PAxghBvJtfdiuGi-xLOf6gAkRMPN2RBglC3yWuVznpKfeLMlDyEssMMMC_JWlc-Y" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&legend=top-left&sealed_token=HAI4jmHzHVGv8Uh0H_8VWsV5YN3XWswbvR7vPn2uIU6XrZ5W-5rk1eIRv89n40g4u7dMavrdOkLqmVFXdZ0km-oO5vbUivWBRMph0-5SwHSSRLgU3fNSy-4bsdH_PAxghBvJtfdiuGi-xLOf6gAkRMPN2RBglC3yWuVznpKfeLMlDyEssMMMC_JWlc-Y" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=dai-hongtao/InkTime&type=timeline&legend=top-left&sealed_token=HAI4jmHzHVGv8Uh0H_8VWsV5YN3XWswbvR7vPn2uIU6XrZ5W-5rk1eIRv89n40g4u7dMavrdOkLqmVFXdZ0km-oO5vbUivWBRMph0-5SwHSSRLgU3fNSy-4bsdH_PAxghBvJtfdiuGi-xLOf6gAkRMPN2RBglC3yWuVznpKfeLMlDyEssMMMC_JWlc-Y" />
- </picture>
-</a>
+本项目参考 PhotoPainter Spectra 6 转换思路：先做尺寸适配和图像增强，再限制到六色调色板，并通过抖动改善观感。当前版本专注本地预览和调参，不生成设备刷写文件。

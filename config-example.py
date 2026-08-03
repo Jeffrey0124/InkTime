@@ -1,69 +1,82 @@
-# 照片库路径（你自己的相册目录）
-IMAGE_DIR = "./test"
+# -*- coding: utf-8 -*-
 
-# 数据库路径（建议保持默认）
+import os
+
+# 小样本相册目录。建议先放 10-30 张测试图片，确认流程和提示词效果后再扩大范围。
+IMAGE_DIR = "./sample_photos"
+
+# analyze_photos.py 生成的 SQLite 数据库。
 DB_PATH = "./photos.db"
 
-# VLM 渠道列表（按优先级从高到低排列）
-# 当某个渠道返回 429 时，自动尝试下一个渠道
+# OpenAI-compatible 视觉模型渠道，按优先级从高到低排列。
+# 运行逻辑：永远先请求 local_lmstudio；本地不可用、超时、HTTP 错误或输出 JSON 不合格时，
+# 自动切换到 cloud_qwen。真实云端 key 请放在本地 config.py 或环境变量里，不要提交。
 API_CHANNELS = [
     {
-        "api_url":    "http://127.0.0.1:1234/v1/chat/completions",
-        "api_key":    "",
-        "model_name": "qwen3-vl-32b-instruct",
+        "name": "local_lmstudio",
+        # 可以填 LM Studio 根地址；程序会自动补 /v1/chat/completions。
+        "api_url": "http://127.0.0.1:9100",
+        "api_key": "",
+        "model_name": "google/gemma-4-31b-qat:2",
+        "timeout": 60,
     },
-    # 可以添加更多渠道，例如：
-    # {
-    #     "api_url":    "https://other-provider.com/v1/chat/completions",
-    #     "api_key":    "sk-xxxxxxxx",
-    #     "model_name": "qwen-vl-plus",
-    # },
+    {
+        "name": "cloud_qwen",
+        "api_url": "https://你的云端地址/compatible-mode/v1/chat/completions",
+        "api_key": os.environ.get("INKTIME_CLOUD_API_KEY", ""),
+        "model_name": "qwen3-vl-plus",
+        "timeout": 600,
+    },
 ]
 
-# 每次最多处理多少张的图片
-BATCH_LIMIT = None
+# 调试阶段建议限制处理数量，避免一次性消耗太多模型调用。
+BATCH_LIMIT = 30
 
-# 请求超时时间（秒）
+# 模型请求超时时间，单位：秒。
 TIMEOUT = 600
 
-# 某个渠道失败后，临时降低其优先级的冷却时间（秒）
-# 例如 A 失败、B 成功后，在冷却期内后续照片会优先从 B 开始请求
+# 某个渠道失败后，临时降低优先级的冷却时间，单位：秒。
 CHANNEL_FAILOVER_COOLDOWN_SEC = 300
 
-# 为防止照片隐私泄露，建议为 ESP32 下载路径加一个随机前缀作为密钥
-# 前缀修改后，请同步修改 esp32/ink-display-7C-photo/ink-display-7C-photo.ino 固件中的 DAILY_PHOTO_PATH_PREFIX 字段）
-DOWNLOAD_KEY = "yourdownloadkey"
-
-# Flask 静态服务
-FLASK_HOST = "0.0.0.0"
+# 本地 Flask 预览服务。
+FLASK_HOST = "127.0.0.1"
 FLASK_PORT = 8765
-# 是否开启照片库 WebUI（前期检验提示词选片效果时使用，跑通后建议关闭）
 ENABLE_REVIEW_WEBUI = True
 
-# 离线中文城市名索引，使用 geonames 数据制作
+# 离线中文城市名索引，用于根据照片 GPS 信息补充城市名。
 WORLD_CITIES_CSV = "./data/world_cities_zh.csv"
-
-# 网格大小（纬度/经度度数）；越大越快但精度略差。1.0 对大多数场景够用。
 CITY_GRID_DEG = 1.0
+CITY_MAX_DISTANCE_KM = 100.0
 
-# 你的“常驻常驻”坐标（用于判断是否为旅行期间照片，从而对评分进行小幅加成）
-# 照片 GPS 距离常驻地超过 HOME_RADIUS_KM，则视为“异地”
-# 默认值给了深圳市中心附近（不改也能保持原行为的大致效果）
+# 常驻地坐标。analyze_photos.py 会用它给旅行照片做小幅回忆分加成。
 HOME_LAT = 22.543096
 HOME_LON = 114.057865
 HOME_RADIUS_KM = 60.0
 
-# 最大接受距离（公里），超出则认为“不在任何城市附近”
-CITY_MAX_DISTANCE_KM = 100.0
+# PhotoPainter Spectra 6 本地渲染输出。
+RENDER_OUTPUT_DIR = "./output/photopainter"
+RENDER_WIDTH = 800
+RENDER_HEIGHT = 432
+FINAL_RENDER_HEIGHT = 480
+CAPTION_BAR_HEIGHT = 48
+RENDER_ORIENTATION = "landscape"
+RENDER_MODE = "scale"
+# PhotoPainter 原版前向 Atkinson，适合照片和人像，作为默认推荐算法。
+DITHER_MODE = "atkinson"
+BRIGHTNESS = 1.1
+CONTRAST = 1.2
+SATURATION = 1.2
+SAVE_BMP_OUTPUT = True
 
-# 墨水屏渲染 BIN 文件输出目录
-BIN_OUTPUT_DIR = "./output"
-
-# 自定义字体路径（为空则退回默认字体）
+# 可选字体路径。当前默认渲染不叠字，保留给后续带文字版布局使用。
 FONT_PATH = ""
 
-# 每日选片“精彩度”阈值
-MEMORY_THRESHOLD = 70.0
-
-# 每日挑选的照片数量
+# 每次渲染到本地画廊的照片数量。
 DAILY_PHOTO_QUANTITY = 5
+
+# 墨水屏自动推送。设备固定读取 /push/latest.bmp；PNG 仅用于浏览器调试。
+PUSH_OUTPUT_DIR = "./output/push"
+PUSH_API_TOKEN = os.environ.get("INKTIME_PUSH_API_TOKEN", "")
+PUSH_SCHEDULES = ["07:00", "12:00", "18:40"]
+PUSH_EXCLUDE_DAYS = 90
+PUSH_TIMEZONE = "Asia/Shanghai"

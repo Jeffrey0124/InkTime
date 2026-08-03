@@ -1,2074 +1,1259 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""纯软件版 PhotoPainter 本地预览服务。"""
+
 from __future__ import annotations
 
-from pathlib import Path
-from flask import Flask, abort, send_file, Response, request, redirect
-import mimetypes
-import sqlite3
-import json
 import html
-import config as cfg
-from io import BytesIO
-import render_daily_photo as rdp
+import json
+import re
+import sqlite3
+import datetime as dt
+from pathlib import Path
+from typing import Any
+
+from flask import Flask, abort, jsonify, redirect, request, send_file
+
+from photo_identity import ensure_photo_identity_schema
+from push_manager import (
+    PushSettings,
+    ensure_push_schema,
+    normalize_render_overrides,
+    publish_render,
+    settings_from_config,
+    write_latest_files,
+)
+from render_photopainter import render_from_database
+from web_queries import load_photo, load_photos, load_status
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 
-# --- config ---
-DOWNLOAD_KEY = str(getattr(cfg, "DOWNLOAD_KEY", "") or "").strip()
-if not DOWNLOAD_KEY:
-    raise SystemExit("config.py 里没有配置 DOWNLOAD_KEY")
-
-DB_PATH = Path(str(getattr(cfg, "DB_PATH", "./photos.db") or "./photos.db")).expanduser()
-if not DB_PATH.is_absolute():
-    DB_PATH = (ROOT_DIR / DB_PATH).resolve()
-
-IMAGE_DIR = Path(str(getattr(cfg, "IMAGE_DIR", "") or "")).expanduser()
-if not IMAGE_DIR.is_absolute():
-    IMAGE_DIR = (ROOT_DIR / IMAGE_DIR).resolve()
-
-BIN_OUTPUT_DIR = Path(str(getattr(cfg, "BIN_OUTPUT_DIR", "./output") or "./output")).expanduser()
-if not BIN_OUTPUT_DIR.is_absolute():
-    BIN_OUTPUT_DIR = (ROOT_DIR / BIN_OUTPUT_DIR).resolve()
-BIN_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-FLASK_HOST = str(getattr(cfg, "FLASK_HOST", "0.0.0.0") or "0.0.0.0")
-FLASK_PORT = int(getattr(cfg, "FLASK_PORT", 8765) or 8765)
-
-# 是否开启照片库 WebUI（跑通后建议关闭，只保留 ESP32 下载接口）
-ENABLE_REVIEW_WEBUI = bool(getattr(cfg, "ENABLE_REVIEW_WEBUI", True))
-
-DAILY_PHOTO_QUANTITY = int(getattr(cfg, "DAILY_PHOTO_QUANTITY", 5) or 5)
-if DAILY_PHOTO_QUANTITY < 1:
-    DAILY_PHOTO_QUANTITY = 1
-
-
-# review 分页：每页 100 张
-REVIEW_PAGE_SIZE = 100
-
-# /review 日期筛选的可用 MM-DD 列表缓存（避免每次都扫全库）
-_MD_CACHE: dict[str, object] = {"md_list": [], "built_at": 0.0}
-_MD_CACHE_TTL_SEC = 300.0  # 5 分钟
-
-def _load_all_md_list() -> list[str]:
-    """从全库提取所有存在的 MM-DD（去重、排序）。用于前端“随机一天”。"""
-    if not DB_PATH.exists():
-        return []
-
-    # 简单 TTL 缓存
-    import time
-    now = time.time()
-    try:
-        built_at = float(_MD_CACHE.get("built_at") or 0.0)
-    except Exception:
-        built_at = 0.0
-    if (now - built_at) < _MD_CACHE_TTL_SEC:
-        cached = _MD_CACHE.get("md_list")
-        if isinstance(cached, list):
-            return [str(x) for x in cached]
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    rows = c.execute("SELECT exif_json FROM photo_scores").fetchall()
-    conn.close()
-
-    s: set[str] = set()
-    for (exif_json,) in rows:
-        d = extract_date_from_exif(exif_json)
-        if d and len(d) >= 10:
-            md = d[5:10]
-            if len(md) == 5 and md[2] == "-":
-                s.add(md)
-
-    md_list = sorted(s)
-    _MD_CACHE["md_list"] = md_list
-    _MD_CACHE["built_at"] = now
-    return md_list
-
-app = Flask(__name__)
-def _require_webui_enabled() -> None:
-    if not ENABLE_REVIEW_WEBUI:
-        abort(404)
-
-
-def _safe_join(base: Path, rel: str) -> Path:
-    """防目录穿越：只允许 base 下的相对路径"""
-    p = (base / rel).resolve()
-    if not str(p).startswith(str(base.resolve())):
-        raise ValueError("path traversal blocked")
-    return p
-
-
-def _send_static_file(p: Path) -> Response:
-    if not p.exists() or not p.is_file():
-        abort(404)
-
-    if p.suffix.lower() == ".bin":
-        return send_file(p, mimetype="application/octet-stream", as_attachment=False)
-
-    mt, _ = mimetypes.guess_type(str(p))
-    if mt:
-        return send_file(p, mimetype=mt, as_attachment=False)
-    return send_file(p, as_attachment=False)
-
-
-def _make_image_url(path_str: str) -> str:
-    """
-    把数据库里的本地图片路径转换成 HTTP 可访问的 /images/... 路径。
-    要求图片在 IMAGE_DIR 目录下；不在则返回空，避免 file:// 污染与 canvas 跨域。
-    """
-    try:
-        p = Path(path_str).expanduser().resolve()
-        rel = p.relative_to(IMAGE_DIR.resolve())
-        return "/images/" + str(rel).replace("\\", "/")
-    except Exception:
-        return ""
-
-
-# --------------------------
-# DB helpers
-# --------------------------
-
-
-def load_rows(page: int = 1, page_size: int = REVIEW_PAGE_SIZE, md: str = "", sort: str = "memory"):
-    """分页读取 review 数据。支持按 MM-DD 过滤与排序。返回 (rows, total_count)."""
-    if not DB_PATH.exists():
-        raise SystemExit(f"找不到数据库文件: {DB_PATH}")
-
-    if page < 1:
-        page = 1
-    if page_size < 1:
-        page_size = REVIEW_PAGE_SIZE
-
-    offset = (page - 1) * page_size
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    # 从 exif_json 里提取 datetime，再拼 MM-DD
-    # 期望格式："YYYY:MM:DD HH:MM:SS"（extract_date_from_exif 也按这个假设）
-    dt_expr = "json_extract(exif_json, '$.datetime')"
-    md_expr = f"(substr({dt_expr}, 6, 2) || '-' || substr({dt_expr}, 9, 2))"
-
-    where_sql = ""
-    params: list[object] = []
-
-    md = (md or "").strip()
-    if md and len(md) == 5 and md[2] == "-":
-        where_sql = f"WHERE {dt_expr} IS NOT NULL AND {md_expr} = ?"
-        params.append(md)
-
-    # total_count 也要跟随过滤
-    if where_sql:
-        total_count = c.execute(f"SELECT COUNT(1) FROM photo_scores {where_sql}", params).fetchone()[0]
-    else:
-        total_count = c.execute("SELECT COUNT(1) FROM photo_scores").fetchone()[0]
-
-    # 排序
-    sort = (sort or "memory").strip()
-    if sort == "beauty":
-        order_sql = "ORDER BY COALESCE(beauty_score, -1) DESC, COALESCE(memory_score, -1) DESC, path"
-    elif sort == "time_new":
-        # 直接按 datetime 字符串排序（固定格式下可按字典序比较）；NULL 放最后
-        order_sql = f"ORDER BY ({dt_expr} IS NULL) ASC, {dt_expr} DESC, path"
-    elif sort == "time_old":
-        order_sql = f"ORDER BY ({dt_expr} IS NULL) ASC, {dt_expr} ASC, path"
-    else:
-        # 默认 memory
-        order_sql = "ORDER BY COALESCE(memory_score, -1) DESC, COALESCE(beauty_score, -1) DESC, path"
-
-    base_sql = f"""
-        SELECT path,
-               caption,
-               type,
-               memory_score,
-               beauty_score,
-               reason,
-               exif_json,
-               width,
-               height,
-               orientation,
-               used_at,
-               side_caption
-        FROM photo_scores
-        {where_sql}
-        {order_sql}
-        LIMIT ? OFFSET ?
-    """
-
-    q_params = list(params) + [page_size, offset]
-    rows = c.execute(base_sql, q_params).fetchall()
-
-    conn.close()
-    return rows, int(total_count)
-
-
-def load_sim_rows():
-    if not DB_PATH.exists():
-        raise SystemExit(f"找不到数据库文件: {DB_PATH}")
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    rows = c.execute(
-        """
-        SELECT path,
-               caption,
-               type,
-               memory_score,
-               beauty_score,
-               reason,
-               side_caption,
-               exif_json,
-               width,
-               height,
-               orientation,
-               used_at,
-               exif_gps_lat,
-               exif_gps_lon,
-               exif_city
-        FROM photo_scores
-        """
-    ).fetchall()
-
-    conn.close()
-    return rows
-
-
-# 新增：只加载指定日期集合的照片，加速 /sim
-def load_sim_rows_for_dates(dates: list[str]):
-    """只加载指定日期（YYYY-MM-DD）集合内的照片，用于 /sim 加速。"""
-    if not dates:
-        return []
-    if not DB_PATH.exists():
-        raise SystemExit(f"找不到数据库文件: {DB_PATH}")
-
-    # 过滤掉不合法日期字符串，避免 SQL 注入（虽然我们用参数化，但也别喂垃圾）
-    safe_dates = []
-    for d in dates:
-        d = (d or "").strip()
-        if len(d) == 10 and d[4] == "-" and d[7] == "-":
-            safe_dates.append(d)
-    if not safe_dates:
-        return []
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    dt_expr = "json_extract(exif_json, '$.datetime')"
-    # exif datetime 形如 YYYY:MM:DD HH:MM:SS，取前 10 位并把 : 替换成 - -> YYYY-MM-DD
-    date_expr = f"replace(substr({dt_expr}, 1, 10), ':', '-')"
-
-    placeholders = ",".join(["?"] * len(safe_dates))
-    sql = f"""
-        SELECT path,
-               caption,
-               type,
-               memory_score,
-               beauty_score,
-               reason,
-               side_caption,
-               exif_json,
-               width,
-               height,
-               orientation,
-               used_at,
-               exif_gps_lat,
-               exif_gps_lon,
-               exif_city
-        FROM photo_scores
-        WHERE {dt_expr} IS NOT NULL
-          AND {date_expr} IN ({placeholders})
-    """
-
-    rows = c.execute(sql, tuple(safe_dates)).fetchall()
-    conn.close()
-    return rows
-
-def get_photo_meta_by_path(abs_path: str):
-    """
-    从 DB 找到渲染需要的字段：date/side/lat/lon/city。
-    abs_path 必须是数据库里 photo_scores.path 的原值（通常是绝对路径）。
-    """
-    if not DB_PATH.exists():
-        return None
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    row = c.execute(
-        """
-        SELECT path,
-               exif_json,
-               side_caption,
-               memory_score,
-               exif_gps_lat,
-               exif_gps_lon,
-               exif_city
-        FROM photo_scores
-        WHERE path = ?
-        LIMIT 1
-        """,
-        (abs_path,),
-    ).fetchone()
-    conn.close()
-
-    if not row:
-        return None
-
-    path, exif_json, side_caption, memory_score, gps_lat, gps_lon, exif_city = row
-    date_str = extract_date_from_exif(exif_json)
-    if not date_str:
-        return None
-
-    return {
-        "path": str(path),
-        "date": date_str,
-        "side": side_caption or "",
-        "memory": float(memory_score) if memory_score is not None else None,
-        "lat": gps_lat,
-        "lon": gps_lon,
-        "city": exif_city or "",
-    }
-
-def summarize_exif(exif_json: str | None) -> str:
-    if not exif_json:
-        return ""
-
-    try:
-        data = json.loads(exif_json)
-    except Exception:
-        return ""
-
-    dtv = data.get("datetime")
-    make = data.get("make")
-    model = data.get("model")
-    iso = data.get("iso")
-    exp = data.get("exposure_time")
-    fnum = data.get("f_number")
-    fl = data.get("focal_length")
-    lat = data.get("gps_lat")
-    lon = data.get("gps_lon")
-
-    parts = []
-    if dtv:
-        parts.append(f"时间: {dtv}")
-    if make or model:
-        cam = f"{make or ''} {model or ''}".strip()
-        if cam:
-            parts.append(f"设备: {cam}")
-    exp_parts = []
-    if iso:
-        exp_parts.append(f"ISO {iso}")
-    if exp:
-        exp_parts.append(f"快门 {exp}")
-    if fnum:
-        exp_parts.append(f"光圈 {fnum}")
-    if fl:
-        exp_parts.append(f"焦距 {fl}")
-    if exp_parts:
-        parts.append(" / ".join(exp_parts))
-    if lat is not None and lon is not None:
-        try:
-            parts.append(f"GPS: {float(lat):.5f}, {float(lon):.5f}")
-        except Exception:
-            parts.append(f"GPS: {lat}, {lon}")
-
-    return "；".join(str(p) for p in parts if p)
-
-
-def extract_date_from_exif(exif_json: str | None) -> str:
-    if not exif_json:
-        return ""
-    try:
-        data = json.loads(exif_json)
-    except Exception:
-        return ""
-    dtv = data.get("datetime")
-    if not dtv:
-        return ""
-    try:
-        date_part = str(dtv).split()[0]  # "2018:03:18"
-        parts = date_part.replace(":", "-").split("-")
-        if len(parts) >= 3:
-            return f"{parts[0]}-{parts[1]}-{parts[2]}"
-    except Exception:
-        return ""
-    return ""
-
-
-# --------------------------
-# HTML builders
-# --------------------------
-
-def build_html(rows, page: int, page_size: int, total_count: int):
-    items_html = []
-
-    for path, caption, ptype, m_score, b_score, reason, exif_json, width, height, orientation, used_at, side_caption in rows:
-        safe_caption = html.escape(caption or "").replace("\n", "<br>")
-        safe_side = html.escape(side_caption or "").replace("\n", "<br>")
-        safe_type = html.escape(ptype or "")
-        safe_reason = html.escape(reason or "")
-        exif_summary = summarize_exif(exif_json)
-        safe_exif = html.escape(exif_summary or "")
-
-        date_str = extract_date_from_exif(exif_json)
-        safe_date = html.escape(date_str or "")
-
-        md_str = ""
-        if date_str and len(date_str) >= 10:
-            md_str = date_str[5:10]
-        safe_md = html.escape(md_str or "")
-
-        res_str = ""
-        if width and height:
-            try:
-                res_str = f"{int(width)} x {int(height)}"
-            except Exception:
-                res_str = f"{width} x {height}"
-        orient_str = orientation or ""
-        used_str = used_at or ""
-
-        img_uri = _make_image_url(str(path))
-        if not img_uri:
-            continue
-
-        score_html = ""
-        if m_score is not None or b_score is not None:
-            parts = []
-            if m_score is not None:
-                parts.append(f"回忆度: {m_score:.1f}")
-            if b_score is not None:
-                parts.append(f"美观度: {b_score:.1f}")
-            score_line = " / ".join(parts)
-            score_html = f'<div class="score">{score_line}</div>'
-
-        type_html = f'<div class="type">类型: {safe_type}</div>' if safe_type else ""
-        exif_html = f'<div class="exif">{safe_exif}</div>' if safe_exif else ""
-        reason_html = f'<div class="reason">理由: {safe_reason}</div>' if safe_reason else ""
-
-        items_html.append(f"""
-        <div class="item"
-             data-date="{safe_date}"
-             data-md="{safe_md}"
-             data-memory="{m_score if m_score is not None else ''}"
-             data-beauty="{b_score if b_score is not None else ''}">
-            <div class="img-wrap">
-                <a class="img-link" href="/sim?img={html.escape(img_uri)}" title="打开该照片的模拟器" onclick="window.stop();">
-                    <img src="{img_uri}" loading="lazy">
-                </a>
-            </div>
-            {f'<div class="side-under">{safe_side}</div>' if safe_side else ''}
-            <div class="meta">
-                <div class="path">{html.escape(str(path))}</div>
-                {type_html}
-                {score_html}
-                {reason_html}
-                {exif_html}
-                <div class="extra">
-                    {f"拍摄日期: {safe_date}" if safe_date else ""}
-                    {(" · 分辨率: " + html.escape(res_str)) if res_str else ""}
-                    {(" · 方向: " + html.escape(orient_str)) if orient_str else ""}
-                    {(" · 已上屏: " + html.escape(used_str)) if used_str else ""}
-                </div>
-                <div class="caption">{safe_caption}</div>
-            </div>
-        </div>
-        """)
-
-    items_str = "\n".join(items_html)
-    total_pages = (total_count + page_size - 1) // page_size
-
-    # 从请求参数回填（用于显示）
-    md_q = (request.args.get("md", "") or "").strip()
-    sort_q = (request.args.get("sort", "") or "memory").strip() or "memory"
-    md_hint = f" · 筛选日期 {html.escape(md_q)}" if (md_q and len(md_q) == 5) else ""
-
-    html_str = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <title>InkTime照片数据库</title>
-  <style>
-    :root{{
-      --bg: #0b0c10;
-      --panel: rgba(255,255,255,0.06);
-      --card: rgba(255,255,255,0.10);
-      --card2: rgba(255,255,255,0.08);
-      --text: rgba(255,255,255,0.92);
-      --muted: rgba(255,255,255,0.62);
-      --muted2: rgba(255,255,255,0.48);
-      --line: rgba(255,255,255,0.14);
-      --accent: #8ab4ff;
-      --accent2:#9cffd6;
-      --shadow: 0 18px 60px rgba(0,0,0,0.45);
-      --shadow2: 0 10px 28px rgba(0,0,0,0.35);
-      --radius: 14px;
-    }}
-    body{{
-      margin:0;
-      padding:0;
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-      background: radial-gradient(1200px 800px at 20% 0%, rgba(138,180,255,0.18), transparent 45%),
-                  radial-gradient(900px 700px at 90% 20%, rgba(156,255,214,0.14), transparent 55%),
-                  linear-gradient(180deg, #07080b 0%, #0b0c10 40%, #0b0c10 100%);
-      color: var(--text);
-    }}
-    .container{{
-      max-width: 1320px;
-      margin: 26px auto 60px;
-      padding: 0 18px;
-    }}
-    h1{{
-      font-size: 22px;
-      margin: 0 0 8px;
-      letter-spacing: 0.2px;
-    }}
-    .subtitle{{
-      font-size: 13px;
-      color: var(--muted);
-      margin: 0 0 14px;
-      line-height: 1.35;
-    }}
-
-    .controls{{
-      display:flex;
-      flex-wrap:wrap;
-      gap: 10px;
-      align-items:center;
-      margin: 12px 0 14px;
-      font-size: 13px;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 10px 12px;
-      box-shadow: var(--shadow2);
-      backdrop-filter: blur(10px);
-    }}
-    .controls label{{
-      display:inline-flex;
-      align-items:center;
-      gap: 8px;
-      color: var(--muted);
-      white-space: nowrap;
-    }}
-    .controls select{{
-      padding: 7px 10px;
-      font-size: 13px;
-      color: var(--text);
-      background: rgba(255,255,255,0.08);
-      border: 1px solid rgba(255,255,255,0.16);
-      border-radius: 10px;
-      outline: none;
-    }}
-    .controls select:focus{{
-      border-color: rgba(138,180,255,0.7);
-      box-shadow: 0 0 0 3px rgba(138,180,255,0.16);
-    }}
-    .controls button{{
-      padding: 7px 12px;
-      font-size: 13px;
-      cursor: pointer;
-      color: var(--text);
-      background: rgba(255,255,255,0.10);
-      border: 1px solid rgba(255,255,255,0.16);
-      border-radius: 10px;
-      transition: transform .08s ease, background .15s ease, border-color .15s ease, opacity .15s ease;
-    }}
-    .controls button:hover{{
-      background: rgba(255,255,255,0.14);
-      border-color: rgba(255,255,255,0.26);
-    }}
-    .controls button:active{{
-      transform: translateY(1px);
-    }}
-    .controls button:disabled{{
-      opacity: 0.45;
-      cursor: not-allowed;
-    }}
-    .controls.pager{{
-      background: rgba(255,255,255,0.05);
-    }}
-
-    .status{{
-      font-size: 12px;
-      color: var(--muted);
-      margin: 8px 0 12px;
-    }}
-
-    .grid{{
-      display:grid;
-      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-      gap: 16px;
-    }}
-    .item{{
-      background: linear-gradient(180deg, var(--card) 0%, var(--card2) 100%);
-      border: 1px solid rgba(255,255,255,0.14);
-      border-radius: var(--radius);
-      overflow: hidden;
-      box-shadow: var(--shadow2);
-      display:flex;
-      flex-direction:column;
-      transition: transform .12s ease, border-color .15s ease, box-shadow .15s ease;
-    }}
-    .item:hover{{
-      transform: translateY(-2px);
-      border-color: rgba(138,180,255,0.38);
-      box-shadow: var(--shadow);
-    }}
-
-    .img-wrap{{
-      width:100%;
-      background: rgba(0,0,0,0.55);
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      max-height: 260px;
-      overflow:hidden;
-    }}
-    .img-wrap img{{
-      width:100%;
-      height:auto;
-      display:block;
-      object-fit: cover;
-      filter: saturate(1.04) contrast(1.02);
-    }}
-    .img-link{{ display:block; width:100%; }}
-    .img-link:link, .img-link:visited{{ text-decoration:none; }}
-
-    .side-under{{
-      padding: 10px 12px 0;
-      font-size: 12px;
-      color: var(--text);
-      line-height: 1.45;
-      word-break: break-word;
-      opacity: 0.92;
-    }}
-
-    .meta{{
-      padding: 10px 12px 12px;
-      font-size: 13px;
-      color: var(--text);
-    }}
-    .path{{
-      font-size: 11px;
-      color: var(--muted2);
-      margin-bottom: 6px;
-      word-break: break-all;
-    }}
-    .type{{
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 4px;
-    }}
-    .score{{
-      font-size: 13px;
-      font-weight: 650;
-      margin-bottom: 6px;
-      color: var(--accent2);
-    }}
-    .reason{{
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 6px;
-      line-height: 1.45;
-    }}
-    .exif{{
-      font-size: 11px;
-      color: var(--muted2);
-      margin-bottom: 8px;
-      line-height: 1.45;
-    }}
-    .extra{{
-      font-size: 11px;
-      color: var(--muted2);
-      margin-bottom: 8px;
-      line-height: 1.45;
-    }}
-    .caption{{
-      margin-top: 6px;
-      font-size: 13px;
-      line-height: 1.55;
-      color: var(--text);
-    }}
-
-    @media (max-width: 560px){{
-      .container{{ padding: 0 14px; }}
-      .grid{{ grid-template-columns: 1fr; }}
-      .controls{{ gap: 8px; }}
-    }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>InkTime照片数据库</h1>
-    <div class="subtitle">
-      数据库：{html.escape(str(DB_PATH))}{md_hint} · 当前页 {page} · 本页 {len(rows)} 张 · 总计 {total_count} 张（每页 {page_size} 张）
-    </div>
-
-    <div class="controls">
-      <label>
-        月份：
-        <select id="monthFilter">
-          <option value="">全部</option>
-          <option value="01">1 月</option><option value="02">2 月</option><option value="03">3 月</option>
-          <option value="04">4 月</option><option value="05">5 月</option><option value="06">6 月</option>
-          <option value="07">7 月</option><option value="08">8 月</option><option value="09">9 月</option>
-          <option value="10">10 月</option><option value="11">11 月</option><option value="12">12 月</option>
-        </select>
-      </label>
-      <label>
-        日期：
-        <select id="dayFilter">
-          <option value="">全部</option>
-          {''.join([f'<option value="{i:02d}">{i} 日</option>' for i in range(1, 32)])}
-        </select>
-      </label>
-      <label>
-        排序：
-        <select id="sortBy">
-          <option value="memory">按回忆度</option>
-          <option value="beauty">按美观度</option>
-          <option value="time_new">按时间（新→旧）</option>
-          <option value="time_old">按时间（旧→新）</option>
-        </select>
-      </label>
-      <button type="button" id="randomDateBtn">随机一天</button>
-      <button type="button" id="homeBtn">回到首页</button>
-    </div>
-
-    <div class="controls pager" style="justify-content: space-between;">
-      <div>
-        <button type="button" id="prevPageBtn">上一页</button>
-        <button type="button" id="nextPageBtn">下一页</button>
-      </div>
-      <div class="subtitle" style="margin:0;">第 <span id="pageNum">{page}</span> 页 / 共 <span id="pageTotal">{total_pages}</span> 页</div>
-    </div>
-
-    <div class="status" id="statusLine"></div>
-
-    <div class="grid">
-      {items_str}
-    </div>
-
-    <div class="controls pager" style="justify-content: space-between; margin-top: 18px;">
-      <div>
-        <button type="button" id="prevPageBtnBottom">上一页</button>
-        <button type="button" id="nextPageBtnBottom">下一页</button>
-      </div>
-      <div class="subtitle" style="margin:0;">第 <span>{page}</span> 页 / 共 <span>{total_pages}</span> 页</div>
-    </div>
-  </div>
-
-  <script>
-    document.addEventListener('DOMContentLoaded', function () {{
-      const monthSelect = document.getElementById('monthFilter');
-      const daySelect = document.getElementById('dayFilter');
-      const sortSelect = document.getElementById('sortBy');
-      const statusLine = document.getElementById('statusLine');
-      const randomBtn = document.getElementById('randomDateBtn');
-      const homeBtn = document.getElementById('homeBtn');
-
-      const currentPage = {page};
-      const totalPages = {total_pages};
-      const prevBtn = document.getElementById('prevPageBtn');
-      const nextBtn = document.getElementById('nextPageBtn');
-      const prevBtnBottom = document.getElementById('prevPageBtnBottom');
-      const nextBtnBottom = document.getElementById('nextPageBtnBottom');
-
-      // 任何跳转前先中断当前页面的图片/资源加载，避免请求排队导致“点击无响应”
-      function navigateTo(urlStr) {{
-        try {{
-          window.stop();
-        }} catch (e) {{
-          // ignore
-        }}
-        window.location.href = urlStr;
-      }}
-
-      function getParams() {{
-        const url = new URL(window.location.href);
-        const md = (url.searchParams.get('md') || '').trim();
-        const sort = (url.searchParams.get('sort') || '').trim() || 'memory';
-        const page = parseInt(url.searchParams.get('page') || '1', 10) || 1;
-        return {{ url, md, sort, page }};
-      }}
-
-      function setSelectsFromUrl() {{
-        const p = getParams();
-        // sort
-        if (sortSelect) sortSelect.value = p.sort;
-        // md -> month/day
-        if (p.md && p.md.length === 5 && p.md.indexOf('-') === 2) {{
-          const parts = p.md.split('-');
-          if (parts.length === 2) {{
-            if (monthSelect) monthSelect.value = parts[0];
-            if (daySelect) daySelect.value = parts[1];
-          }}
-          if (statusLine) statusLine.textContent = '当前筛选：' + p.md + '（全库）';
-        }} else {{
-          if (monthSelect) monthSelect.value = '';
-          if (daySelect) daySelect.value = '';
-          if (statusLine) statusLine.textContent = '';
-        }}
-      }}
-
-      function buildReviewUrl(md, sort, page) {{
-        const url = new URL(window.location.href);
-        url.pathname = '/review';
-        if (md && md.length === 5 && md.indexOf('-') === 2) url.searchParams.set('md', md);
-        else url.searchParams.delete('md');
-        if (sort) url.searchParams.set('sort', sort);
-        else url.searchParams.delete('sort');
-        url.searchParams.set('page', String(page || 1));
-        return url.toString();
-      }}
-
-      function goPage(p) {{
-        const params = getParams();
-        navigateTo(buildReviewUrl(params.md, params.sort, p));
-      }}
-
-      function goHome() {{
-        const params = getParams();
-        navigateTo(buildReviewUrl('', params.sort || 'memory', 1));
-      }}
-
-      async function pickRandomDate() {{
-        // 从后端拿“真实存在的日期集合”，前端随机一个，然后让后端按 md 过滤
-        try {{
-          // 先停止当前页面的图片加载，释放连接
-          try {{ window.stop(); }} catch (e) {{}}
-          const resp = await fetch('/api/md_list');
-          if (!resp.ok) throw new Error('HTTP ' + resp.status);
-          const data = await resp.json();
-          const arr = Array.isArray(data) ? data : (Array.isArray(data.md_list) ? data.md_list : []);
-          if (!arr.length) {{
-            if (statusLine) statusLine.textContent = '全库没有任何可用日期（exif datetime 缺失）。';
-            return;
-          }}
-          const idx = Math.floor(Math.random() * arr.length);
-          const md = String(arr[idx] || '').trim();
-          const params = getParams();
-          navigateTo(buildReviewUrl(md, params.sort || 'memory', 1));
-        }} catch (e) {{
-          if (statusLine) statusLine.textContent = '随机失败：' + e;
-        }}
-      }}
-
-      function onMonthDayChange() {{
-        const mVal = (monthSelect && monthSelect.value) ? monthSelect.value : '';
-        const dVal = (daySelect && daySelect.value) ? daySelect.value : '';
-        const sortBy = (sortSelect && sortSelect.value) ? sortSelect.value : 'memory';
-
-        if (!mVal && !dVal) {{
-          navigateTo(buildReviewUrl('', sortBy, 1));
-          return;
-        }}
-        if (mVal && dVal) {{
-          const md = mVal + '-' + dVal;
-          navigateTo(buildReviewUrl(md, sortBy, 1));
-          return;
-        }}
-        // 只选了一个，不跳转，避免生成无意义的 md
-      }}
-
-      function onSortChange() {{
-        const params = getParams();
-        const sortBy = (sortSelect && sortSelect.value) ? sortSelect.value : 'memory';
-        navigateTo(buildReviewUrl(params.md, sortBy, 1));
-      }}
-
-      // 分页按钮
-      if (prevBtn) {{
-        prevBtn.disabled = currentPage <= 1;
-        prevBtn.addEventListener('click', () => goPage(Math.max(1, currentPage - 1)));
-      }}
-      if (nextBtn) {{
-        nextBtn.disabled = currentPage >= totalPages;
-        nextBtn.addEventListener('click', () => goPage(Math.min(totalPages, currentPage + 1)));
-      }}
-      if (prevBtnBottom) {{
-        prevBtnBottom.disabled = currentPage <= 1;
-        prevBtnBottom.addEventListener('click', () => goPage(Math.max(1, currentPage - 1)));
-      }}
-      if (nextBtnBottom) {{
-        nextBtnBottom.disabled = currentPage >= totalPages;
-        nextBtnBottom.addEventListener('click', () => goPage(Math.min(totalPages, currentPage + 1)));
-      }}
-
-      if (monthSelect) monthSelect.addEventListener('change', onMonthDayChange);
-      if (daySelect) daySelect.addEventListener('change', onMonthDayChange);
-      if (sortSelect) sortSelect.addEventListener('change', onSortChange);
-      if (randomBtn) randomBtn.addEventListener('click', pickRandomDate);
-      if (homeBtn) homeBtn.addEventListener('click', goHome);
-
-      // 兜底：用户在图片疯狂加载时点击任何链接/按钮，先 stop()，避免导航请求排队
-      document.addEventListener('click', function (ev) {{
-        const t = ev.target;
-        if (!t) return;
-        const a = t.closest ? t.closest('a') : null;
-        const btn = t.closest ? t.closest('button') : null;
-        // 只要是链接或按钮点击，就先中断当前加载
-        if (a || btn) {{
-          try {{ window.stop(); }} catch (e) {{}}
-        }}
-      }}, true);
-
-      setSelectsFromUrl();
-    }});
-  </script>
-</body>
-</html>
-"""
-    return html_str
-
-
-def build_simulator_html(sim_rows, selected_img: str = ""):
-    # 空数据时不要做任何无意义的循环，避免前端 JS 大对象
-    if not sim_rows:
-        sim_rows = []
-    items = []
-
-    def _parse_tags(ptype_val) -> list[str]:
-        """把 DB 的 type 字段解析成 tag 数组。
-        兼容三种常见存储：
-        - JSON 数组：   ["人物","日常"]
-        - 伪数组文本：  [人物, 日常] / [人物，日常]
-        - 普通字符串：  人物,日常 / 人物
-        注意：这里是容错解析，目的是不让 /sim 因坏数据 500。
-        """
-        if ptype_val is None:
-            return []
-        s = str(ptype_val).strip()
-        if not s:
-            return []
-
-        # 1) 先尝试严格 JSON
-        if s.startswith("[") and s.endswith("]"):
-            try:
-                arr = json.loads(s)
-                if isinstance(arr, list):
-                    out = []
-                    for x in arr:
-                        t = str(x).strip()
-                        if t:
-                            out.append(t)
-                    return out
-            except Exception:
-                # JSON 不合法：继续走容错
-                pass
-
-        # 2) 容错：去掉最外层 [] 以及引号，然后按逗号/中文逗号切
-        if s.startswith("[") and s.endswith("]"):
-            s = s[1:-1].strip()
-
-        # 去掉可能出现的引号
-        s = s.replace('"', '').replace("'", "")
-
-        parts = [p.strip() for p in s.replace('，', ',').split(',')]
-        out = [p for p in parts if p]
-        return out
-    for (
-        path,
-        caption,
-        ptype,
-        memory_score,
-        beauty_score,
-        reason,
-        side_caption,
-        exif_json,
-        width,
-        height,
-        orientation,
-        used_at,
-        gps_lat,
-        gps_lon,
-        exif_city,
-    ) in sim_rows:
-        date_str = extract_date_from_exif(exif_json)
-        if not date_str:
-            continue
-        img_uri = _make_image_url(str(path))
-        if not img_uri:
-            continue
-
-        # tags: 保证为数组，优先解析 JSON/容错
-        type_value = _parse_tags(ptype)
-
-        items.append({
-            "path": img_uri,
-            "date": date_str,
-            "memory": float(memory_score) if memory_score is not None else None,
-            "beauty": float(beauty_score) if beauty_score is not None else None,
-            "city": exif_city or "",
-            "lat": gps_lat,
-            "lon": gps_lon,
-            "side": side_caption or "",
-            "caption": caption or "",
-            "type": type_value,
-            "reason": reason or "",
-            "exif_json": exif_json or "",
-            "exif_summary": summarize_exif(exif_json) if exif_json else "",
-            "width": width if width is not None else "",
-            "height": height if height is not None else "",
-            "orientation": orientation or "",
-            "used_at": used_at or "",
-        })
-
-    data_json = json.dumps(items, ensure_ascii=False).replace("</", "<\\/") if items else "[]"
-    selected_json = json.dumps(selected_img or "", ensure_ascii=False).replace("</", "<\\/")
-
-    html_str = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <title>墨水屏渲染效果预览</title>
-  <style>
-    :root {{
-      --bg: #0b0c10;
-      --panel: rgba(255,255,255,0.06);
-      --line: rgba(255,255,255,0.14);
-      --text: rgba(255,255,255,0.92);
-      --muted: rgba(255,255,255,0.62);
-      --muted2: rgba(255,255,255,0.48);
-      --accent: #8ab4ff;
-      --accent2: #9cffd6;
-      --shadow: 0 18px 60px rgba(0,0,0,0.45);
-      --shadow2: 0 10px 28px rgba(0,0,0,0.35);
-      --radius: 14px;
-    }}
-    body {{
-      margin:0; padding:0;
-      font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
-      background: radial-gradient(1200px 800px at 20% 0%, rgba(138,180,255,0.18), transparent 45%),
-                  radial-gradient(900px 700px at 90% 20%, rgba(156,255,214,0.14), transparent 55%),
-                  linear-gradient(180deg, #07080b 0%, #0b0c10 40%, #0b0c10 100%);
-      color: var(--text);
-    }}
-    .container {{
-      max-width: 1120px;
-      margin: 22px auto 42px;
-      padding: 0 16px;
-    }}
-    a.back {{
-      display:inline-block;
-      margin-bottom: 10px;
-      color: var(--accent);
-      text-decoration: none;
-    }}
-    h1 {{
-      font-size: 22px;
-      margin: 0 0 8px;
-      letter-spacing: 0.2px;
-    }}
-    .subtitle {{
-      font-size: 13px;
-      color: var(--muted);
-      margin-bottom: 14px;
-      line-height: 1.45;
-    }}
-    .controls {{
-      display:flex;
-      align-items:center;
-      gap: 10px;
-      margin-bottom: 14px;
-      font-size: 13px;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 10px 12px;
-      box-shadow: var(--shadow2);
-      backdrop-filter: blur(10px);
-    }}
-    .controls button {{
-      padding: 7px 12px;
-      font-size: 13px;
-      cursor: pointer;
-      color: var(--text);
-      background: rgba(255,255,255,0.10);
-      border: 1px solid rgba(255,255,255,0.16);
-      border-radius: 10px;
-      transition: transform .08s ease, background .15s ease, border-color .15s ease, opacity .15s ease;
-    }}
-    .controls button:hover {{
-      background: rgba(255,255,255,0.14);
-      border-color: rgba(255,255,255,0.26);
-    }}
-    .controls button:active {{
-      transform: translateY(1px);
-    }}
-
-    .status {{
-      font-size: 12px;
-      color: var(--muted);
-      margin: 6px 0 10px;
-      min-height: 16px;
-    }}
-
-    .preview-wrap {{
-      display:flex;
-      flex-wrap:wrap;
-      gap: 16px;
-      align-items: flex-start;
-    }}
-    .canvas-box {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 10px;
-      box-shadow: var(--shadow2);
-      backdrop-filter: blur(10px);
-    }}
-    .canvas-box h2 {{
-      font-size: 13px;
-      margin: 0 0 8px;
-      color: rgba(255,255,255,0.78);
-    }}
-    #previewCanvas {{
-      display:block;
-      background:#fff;
-      border: 1px solid rgba(255,255,255,0.18);
-      border-radius: 10px;
-    }}
-
-    .meta-box {{
-      flex: 1;
-      min-width: 320px;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 12px;
-      box-shadow: var(--shadow2);
-      backdrop-filter: blur(10px);
-      font-size: 16px;
-      line-height: 1.75;
-    }}
-    .meta-title {{
-      font-size: 13px;
-      color: rgba(255,255,255,0.78);
-      margin: 0 0 10px;
-    }}
-    .kpi {{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin-bottom: 12px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid rgba(255,255,255,0.10);
-    }}
-    .kpi .cell {{
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.10);
-      border-radius: 12px;
-      padding: 10px;
-    }}
-    .kpi .label {{
-      font-size: 11px;
-      color: var(--muted2);
-      margin-bottom: 4px;
-    }}
-    .kpi .value {{
-      font-size: 16px;
-      font-weight: 700;
-      color: var(--text);
-      line-height: 1.2;
-      word-break: break-word;
-    }}
-    .kpi .value.accent {{
-      color: var(--accent2);
-    }}
-
-    .field {{
-      display:flex;
-      gap: 10px;
-      margin-bottom: 8px;
-      line-height: 1.45;
-      font-size: 12px;
-    }}
-    .field .label {{
-      width: 92px;
-      flex: 0 0 92px;
-      color: var(--muted2);
-    }}
-    .field .value {{
-      flex: 1;
-      color: var(--text);
-      word-break: break-word;
-    }}
-    .mono {{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      font-size: 11px;
-      color: rgba(255,255,255,0.80);
-      white-space: pre-wrap;
-      word-break: break-word;
-      background: rgba(0,0,0,0.22);
-      border: 1px solid rgba(255,255,255,0.10);
-      border-radius: 12px;
-      padding: 10px;
-    }}
-
-    .section {{
-      padding-top: 10px;
-      margin-top: 10px;
-      border-top: 1px solid rgba(255,255,255,0.10);
-    }}
-    .section:first-of-type {{
-      padding-top: 0;
-      margin-top: 0;
-      border-top: none;
-    }}
-    .section-title {{
-      display:flex;
-      align-items:center;
-      justify-content: space-between;
-      gap: 10px;
-      font-size: 12px;
-      color: rgba(255,255,255,0.78);
-      margin: 0 0 8px;
-      letter-spacing: .2px;
-    }}
-
-    .chips {{
-      display:flex;
-      flex-wrap:wrap;
-      gap: 8px;
-      margin: 12px 0 14px;
-    }}
-    .chip {{
-      display:inline-flex;
-      align-items:center;
-      gap: 6px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      line-height: 1;
-      border: 1px solid rgba(255,255,255,0.18);
-      background: rgba(255,255,255,0.07);
-      color: rgba(255,255,255,0.92);
-      user-select: none;
-    }}
-    .chip-dot {{
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.7);
-      flex: 0 0 8px;
-    }}
-
-    .big-text {{
-      font-size: 13px;
-      line-height: 1.55;
-      color: rgba(255,255,255,0.92);
-      padding: 10px 12px;
-      background: rgba(255,255,255,0.06);
-      border: 1px solid rgba(255,255,255,0.10);
-      border-radius: 12px;
-      word-break: break-word;
-      white-space: pre-wrap;
-    }}
-
-    details.fold {{
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.10);
-      border-radius: 12px;
-      padding: 10px 12px;
-      margin-top: 18px;
-      font-size: 14px;
-    }}
-    details.fold > summary {{
-      cursor: pointer;
-      list-style: none;
-      outline: none;
-      color: rgba(255,255,255,0.86);
-      font-size: 12px;
-      display:flex;
-      align-items:center;
-      justify-content: space-between;
-      gap: 10px;
-    }}
-    details.fold > summary::-webkit-details-marker {{ display: none; }}
-    .fold-hint {{
-      color: rgba(255,255,255,0.55);
-      font-size: 11px;
-    }}
-
-    .kv-grid {{
-      display:grid;
-      grid-template-columns: 92px 1fr;
-      gap: 8px 10px;
-      margin-top: 10px;
-      font-size: 12px;
-      line-height: 1.45;
-    }}
-    .kv-k {{
-      color: rgba(255,255,255,0.52);
-    }}
-    .kv-v {{
-      color: rgba(255,255,255,0.92);
-      word-break: break-word;
-    }}
-
-    .hero-text {{
-      font-size: 26px;
-      line-height: 1.7;
-      font-weight: 650;
-      margin-bottom: 18px;
-      color: rgba(255,255,255,0.98);
-      word-break: break-word;
-      white-space: pre-wrap;
-    }}
-
-    .sub-text {{
-      font-size: 17px;
-      line-height: 1.8;
-      color: rgba(255,255,255,0.90);
-      margin: 14px 0 18px;
-      word-break: break-word;
-      white-space: pre-wrap;
-    }}
-
-    .score-bars {{
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 10px;
-      margin: 18px 0 20px;
-    }}
-
-    .score-row {{
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-size: 14px;
-      color: rgba(255,255,255,0.75);
-    }}
-
-    .score-track {{
-      position: relative;
-      flex: 1;
-      height: 10px;
-      background: rgba(255,255,255,0.12);
-      border-radius: 999px;
-      overflow: hidden;
-    }}
-
-    .score-fill {{
-      position: absolute;
-      left: 0; top: 0; bottom: 0;
-      width: 0%;
-      border-radius: 999px;
-    }}
-
-    .score-fill.memory {{ background: linear-gradient(90deg, #6fd6ff, #9cffd6); }}
-    .score-fill.beauty {{ background: linear-gradient(90deg, #ffd36f, #ff9f6f); }}
-
-    .score-num {{
-      width: 44px;
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-      color: rgba(255,255,255,0.9);
-    }}
-
-    #fieldReason {{
-      font-size: 16px;
-      line-height: 1.8;
-      margin-top: 6px;
-    }}
-
-    @media (max-width: 560px) {{
-      .kpi {{ grid-template-columns: 1fr; }}
-      .meta-box {{ min-width: 0; }}
-    }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <a class="back" href="/review">← 返回 Review</a>
-    <h1>墨水屏渲染效果预览</h1>
-    <div class="subtitle">
-      屏幕尺寸：480 x 800&nbsp;&nbsp;
-      <span style="display:inline-flex; gap:6px; vertical-align:middle;">
-        <span style="width:10px;height:10px;box-sizing:border-box;border-radius:50%;background:#000;border:1px solid rgba(255,255,255,0.70);"></span>
-        <span style="width:10px;height:10px;box-sizing:border-box;border-radius:50%;background:#fff;border:1px solid rgba(255,255,255,0.45);"></span>
-        <span style="width:10px;height:10px;box-sizing:border-box;border-radius:50%;background:#c80000;border:1px solid rgba(255,255,255,0.18);"></span>
-        <span style="width:10px;height:10px;box-sizing:border-box;border-radius:50%;background:#e0b400;border:1px solid rgba(255,255,255,0.18);"></span>
-      </span>
-    </div>
-
-    <div class="controls">
-      <button type="button" id="rerollBtn">同一天换一张</button>
-    </div>
-
-    <div class="status" id="statusLine"></div>
-
-    <div class="preview-wrap">
-      <div class="canvas-box">
-        <canvas id="previewCanvas" width="480" height="800"></canvas>
-      </div>
-
-      <div class="meta-box">
-        <div class="hero-text" id="kpiSide"></div>
-
-        <div class="chips" id="fieldType"></div>
-
-        <div class="sub-text" id="fieldCaption"></div>
-
-        <div class="score-bars">
-          <div class="score-row">
-            <div>回忆度</div>
-            <div class="score-track">
-              <div class="score-fill memory" id="barMemory"></div>
-            </div>
-            <div class="score-num" id="numMemory"></div>
-          </div>
-          <div class="score-row">
-            <div>美观度</div>
-            <div class="score-track">
-              <div class="score-fill beauty" id="barBeauty"></div>
-            </div>
-            <div class="score-num" id="numBeauty"></div>
-          </div>
-        </div>
-
-        <div class="sub-text" id="fieldReason"></div>
-
-        <details class="fold">
-          <summary>
-            <span>更多信息</span>
-            <span class="fold-hint">EXIF / 路径 / 调试</span>
-          </summary>
-
-          <div class="kv-grid">
-            <div class="kv-k">日期</div><div class="kv-v" id="kpiDate"></div>
-            <div class="kv-k">地点</div><div class="kv-v" id="kpiLocation"></div>
-            <div class="kv-k">图片URL</div><div class="kv-v" id="fieldPath"></div>
-            <div class="kv-k">原始路径</div><div class="kv-v" id="fieldOrigPath"></div>
-            <div class="kv-k">分辨率</div><div class="kv-v" id="fieldRes"></div>
-            <div class="kv-k">方向</div><div class="kv-v" id="fieldOrientation"></div>
-            <div class="kv-k">已上屏</div><div class="kv-v" id="fieldUsedAt"></div>
-            <div class="kv-k">EXIF摘要</div><div class="kv-v" id="fieldExifSummary"></div>
-          </div>
-
-          <details class="fold" style="margin-top:10px;">
-            <summary>
-              <span>EXIF JSON</span>
-              <span class="fold-hint">调试</span>
-            </summary>
-            <div class="mono" id="fieldExifJson"></div>
-          </details>
-        </details>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    const PHOTOS = {data_json};
-    const SELECTED_IMG = {selected_json};
-
-    const byDate = new Map();
-    for (const p of PHOTOS) {{
-      if (!p.date) continue;
-      if (!byDate.has(p.date)) byDate.set(p.date, []);
-      byDate.get(p.date).push(p);
-    }}
-    for (const [d, arr] of byDate.entries()) {{
-      arr.sort((a, b) => ((b.memory ?? -1) - (a.memory ?? -1)));
-    }}
-
-    const canvas = document.getElementById('previewCanvas');
-    const ctx = canvas.getContext('2d');
-    const statusLine = document.getElementById('statusLine');
-
-    const kpiDate = document.getElementById('kpiDate');
-    const kpiLocation = document.getElementById('kpiLocation');
-    const kpiSide = document.getElementById('kpiSide');
-
-    const fieldPath = document.getElementById('fieldPath');
-    const fieldOrigPath = document.getElementById('fieldOrigPath');
-    const fieldType = document.getElementById('fieldType');
-    const fieldCaption = document.getElementById('fieldCaption');
-    const fieldReason = document.getElementById('fieldReason');
-    const fieldRes = document.getElementById('fieldRes');
-    const fieldOrientation = document.getElementById('fieldOrientation');
-    const fieldUsedAt = document.getElementById('fieldUsedAt');
-    const fieldExifSummary = document.getElementById('fieldExifSummary');
-    const fieldExifJson = document.getElementById('fieldExifJson');
-
-    // 评分条
-    const barMemory = document.getElementById('barMemory');
-    const barBeauty = document.getElementById('barBeauty');
-    const numMemory = document.getElementById('numMemory');
-    const numBeauty = document.getElementById('numBeauty');
-
-    let currentDate = null;
-    let currentPhoto = null;
-
-    function formatLocation(lat, lon, city) {{
-      const c = (city || '').trim();
-      if (c.length > 0) return c;
-      if (lat == null || lon == null) return '';
-      try {{
-        return Number(lat).toFixed(5) + ', ' + Number(lon).toFixed(5);
-      }} catch (e) {{
-        return String(lat) + ', ' + String(lon);
-      }}
-    }}
-
-    function formatDateDisplay(dateStr) {{
-      if (!dateStr) return '';
-      const parts = dateStr.split('-');
-      if (parts.length < 3) return dateStr;
-      const y = parts[0];
-      const m = String(parseInt(parts[1], 10));
-      const d = String(parseInt(parts[2], 10));
-      return y + '.' + m + '.' + d;
-    }}
-
-    function escapeHtml(s) {{
-      return String(s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }}
-
-    function hashToHue(str) {{
-      // 简单稳定 hash -> 0..359
-      let h = 0;
-      const s = String(str || '');
-      for (let i = 0; i < s.length; i++) {{
-        h = (h * 31 + s.charCodeAt(i)) >>> 0;
-      }}
-      return h % 360;
-    }}
-
-    function renderTags(tags) {{
-      if (!Array.isArray(tags) || tags.length === 0) return '';
-      let htmlOut = '';
-      for (const t of tags) {{
-        if (!t) continue;
-        const hue = hashToHue(t);
-        const bg = 'hsla(' + hue + ', 90%, 55%, 0.14)';
-        const bd = 'hsla(' + hue + ', 90%, 55%, 0.30)';
-        const dot = 'hsl(' + hue + ', 90%, 62%)';
-        htmlOut += '<span class="chip" style="background:' + bg + '; border-color:' + bd + ';">'
-          + '<span class="chip-dot" style="background:' + dot + ';"></span>'
-          + escapeHtml(t)
-          + '</span>';
-      }}
-      return htmlOut;
-    }}
-
-    function safeText(v) {{
-      if (v === null || v === undefined) return '';
-      return String(v);
-    }}
-
-    function wrapText(ctx, text, x, y, maxWidth, lineHeight, maxLines) {{
-      if (!text) return;
-      const words = text.split(/\\s+/);
-      let line = '';
-      let lineCount = 0;
-      for (let n = 0; n < words.length; n++) {{
-        const testLine = line ? (line + ' ' + words[n]) : words[n];
-        const metrics = ctx.measureText(testLine);
-        if (metrics.width > maxWidth && n > 0) {{
-          ctx.fillText(line, x, y);
-          line = words[n];
-          y += lineHeight;
-          lineCount++;
-          if (lineCount >= maxLines) break;
-        }} else {{
-          line = testLine;
-        }}
-      }}
-      if (line && lineCount < maxLines) ctx.fillText(line, x, y);
-    }}
-
-    function applyFourColorDither() {{
-      const w = canvas.width, h = canvas.height;
-      let imgData;
-      try {{
-        imgData = ctx.getImageData(0, 0, w, h);
-      }} catch (e) {{
-        statusLine.textContent = '无法从画布读取像素（跨域或图片未走 /images）：' + e;
-        return;
-      }}
-      const data = imgData.data;
-
-      const palette = [
-        {{ r: 0, g: 0, b: 0 }},
-        {{ r: 255, g: 255, b: 255 }},
-        {{ r: 200, g: 0, b: 0 }},
-        {{ r: 220, g: 180, b: 0 }}
-      ];
-
-      const errR = new Float32Array(w);
-      const errG = new Float32Array(w);
-      const errB = new Float32Array(w);
-      const nextErrR = new Float32Array(w);
-      const nextErrG = new Float32Array(w);
-      const nextErrB = new Float32Array(w);
-
-      function nearestColor(r, g, b) {{
-        let bestIndex = 0;
-        let bestDist = Infinity;
-        for (let i = 0; i < palette.length; i++) {{
-          const pr = palette[i].r, pg = palette[i].g, pb = palette[i].b;
-          const dr = r - pr, dg = g - pg, db = b - pb;
-          const dist = dr*dr + dg*dg + db*db;
-          if (dist < bestDist) {{ bestDist = dist; bestIndex = i; }}
-        }}
-        return palette[bestIndex];
-      }}
-
-      for (let y = 0; y < h; y++) {{
-        for (let x = 0; x < w; x++) {{
-          const idx = (y * w + x) * 4;
-
-          let r = data[idx] + errR[x];
-          let g = data[idx + 1] + errG[x];
-          let b = data[idx + 2] + errB[x];
-
-          r = r < 0 ? 0 : (r > 255 ? 255 : r);
-          g = g < 0 ? 0 : (g > 255 ? 255 : g);
-          b = b < 0 ? 0 : (b > 255 ? 255 : b);
-
-          const nc = nearestColor(r, g, b);
-
-          data[idx] = nc.r;
-          data[idx + 1] = nc.g;
-          data[idx + 2] = nc.b;
-
-          const er = r - nc.r, eg = g - nc.g, eb = b - nc.b;
-
-          if (x + 1 < w) {{
-            errR[x + 1] += er * (7 / 16);
-            errG[x + 1] += eg * (7 / 16);
-            errB[x + 1] += eb * (7 / 16);
-          }}
-          if (y + 1 < h) {{
-            if (x > 0) {{
-              nextErrR[x - 1] += er * (3 / 16);
-              nextErrG[x - 1] += eg * (3 / 16);
-              nextErrB[x - 1] += eb * (3 / 16);
-            }}
-            nextErrR[x] += er * (5 / 16);
-            nextErrG[x] += eg * (5 / 16);
-            nextErrB[x] += eb * (5 / 16);
-            if (x + 1 < w) {{
-              nextErrR[x + 1] += er * (1 / 16);
-              nextErrG[x + 1] += eg * (1 / 16);
-              nextErrB[x + 1] += eb * (1 / 16);
-            }}
-          }}
-        }}
-
-        if (y + 1 < h) {{
-          for (let i = 0; i < w; i++) {{
-            errR[i] = nextErrR[i]; errG[i] = nextErrG[i]; errB[i] = nextErrB[i];
-            nextErrR[i] = 0; nextErrG[i] = 0; nextErrB[i] = 0;
-          }}
-        }}
-      }}
-
-      ctx.putImageData(imgData, 0, 0);
-    }}
-
-    function updateMeta(photo) {{
-      if (!photo) {{
-        kpiDate.textContent = '';
-        kpiLocation.textContent = '';
-        kpiSide.textContent = '';
-
-        fieldPath.textContent = '';
-        fieldOrigPath.textContent = '';
-        fieldType.innerHTML = '';
-        fieldCaption.textContent = '';
-        fieldReason.textContent = '';
-        fieldRes.textContent = '';
-        fieldOrientation.textContent = '';
-        fieldUsedAt.textContent = '';
-        fieldExifSummary.textContent = '';
-        fieldExifJson.textContent = '';
-        // 清空评分条
-        barMemory.style.width = '0%';
-        barBeauty.style.width = '0%';
-        numMemory.textContent = '';
-        numBeauty.textContent = '';
-        return;
-      }}
-
-      // 填充 meta-box 新结构
-      kpiSide.textContent = photo.side ? '「' + safeText(photo.side) + '」' : '';
-      fieldType.innerHTML = renderTags(photo.type);
-      fieldCaption.textContent = safeText(photo.caption);
-
-      // 评分条
-      const m = photo.memory != null ? Math.max(0, Math.min(100, photo.memory)) : 0;
-      const b = photo.beauty != null ? Math.max(0, Math.min(100, photo.beauty)) : 0;
-      barMemory.style.width = m + '%';
-      barBeauty.style.width = b + '%';
-      numMemory.textContent = m ? m.toFixed(1) : '';
-      numBeauty.textContent = b ? b.toFixed(1) : '';
-
-      fieldReason.textContent = photo.reason ? '评分理由：' + safeText(photo.reason) : '';
-
-      // 更多信息区
-      const loc = formatLocation(photo.lat, photo.lon, photo.city);
-      kpiDate.textContent = safeText(photo.date);
-      kpiLocation.textContent = safeText(loc);
-      fieldPath.textContent = safeText(photo.path);
-      fieldOrigPath.textContent = safeText(photo.orig_path || '');
-      const res = (safeText(photo.width) || safeText(photo.height)) ? (safeText(photo.width) + ' x ' + safeText(photo.height)) : '';
-      fieldRes.textContent = res;
-      fieldOrientation.textContent = safeText(photo.orientation);
-      fieldUsedAt.textContent = safeText(photo.used_at);
-      fieldExifSummary.textContent = safeText(photo.exif_summary);
-      fieldExifJson.textContent = safeText(photo.exif_json);
-    }}
-
-    function drawPreview(photo) {{
-      if (!photo) {{
-        statusLine.textContent = '未指定照片。请从 /review 点击某张照片进入模拟器。';
-        return;
-      }}
-
-      statusLine.textContent = ''; // 正常情况不显示废话
-
-      canvas.width = 480;
-      canvas.height = 800;
-
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      const img = new Image();
-      img.onload = function() {{
-          canvas.width = 480;
-          canvas.height = 800;
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(img, 0, 0, 480, 800);
-        }};
-      img.onerror = function() {{
-        statusLine.textContent = '图片加载失败：' + photo.path;
-      }};
-      img.src = '/sim_render?img=' + encodeURIComponent(photo.path);
-    }}
-
-    function pickPhotoFromDate(date) {{
-      const arr = byDate.get(date) || [];
-      if (!arr.length) return null;
-
-      const THRESHOLD = {float(getattr(cfg, "MEMORY_THRESHOLD", 70.0) or 70.0)};
-      const candidates = arr.filter(p => p.memory != null && p.memory > THRESHOLD);
-      if (candidates.length > 0) {{
-        const idx = Math.floor(Math.random() * candidates.length);
-        return {{ photo: candidates[idx], dateUsed: date }};
-      }}
-
-      // 兜底：当天随便挑
-      const idx = Math.floor(Math.random() * arr.length);
-      return {{ photo: arr[idx], dateUsed: date, fallbackNoThreshold: true }};
-    }}
-
-    function getPreviousDateStr(dateStr) {{
-      if (!dateStr) return null;
-      const parts = dateStr.split('-');
-      if (parts.length < 3) return null;
-      const y = parseInt(parts[0], 10);
-      const m = parseInt(parts[1], 10);
-      const d = parseInt(parts[2], 10);
-      if (!y || !m || !d) return null;
-      const dt = new Date(y, m - 1, d);
-      dt.setDate(dt.getDate() - 1);
-      const yy = dt.getFullYear();
-      const mm = String(dt.getMonth() + 1).padStart(2, '0');
-      const dd = String(dt.getDate()).padStart(2, '0');
-      return yy + '-' + mm + '-' + dd;
-    }}
-
-    function pickPhotoWithLookback(baseDate) {{
-      if (!baseDate) return null;
-      let date = baseDate;
-      const MAX_LOOKBACK = 30;
-
-      for (let i = 0; i < MAX_LOOKBACK; i++) {{
-        const picked = pickPhotoFromDate(date);
-        if (picked && picked.photo) return picked;
-        const prev = getPreviousDateStr(date);
-        if (!prev) break;
-        date = prev;
-      }}
-
-      // 最终兜底：目标日期没找到 map，啥也不干
-      return null;
-    }}
-
-    function findSelectedPhoto() {{
-      if (!SELECTED_IMG) return null;
-      for (const p of PHOTOS) {{
-        if (p.path === SELECTED_IMG) return p;
-      }}
-      return null;
-    }}
-
-    function onRerollSameDay() {{
-      if (!currentDate) {{
-        statusLine.textContent = '请从 /review 点击某张照片进入模拟器。';
-        return;
-      }}
-
-      const pick = pickPhotoWithLookback(currentDate);
-      if (!pick || !pick.photo) {{
-        statusLine.textContent = '该日期及向前 30 天内没有可用照片。';
-        return;
-      }}
-
-      // 如果刚好又抽到自己，尝试再抽几次
-      let tries = 0;
-      let chosen = pick;
-      while (tries < 6 && chosen && chosen.photo && currentPhoto && chosen.photo.path === currentPhoto.path) {{
-        const again = pickPhotoWithLookback(currentDate);
-        if (!again || !again.photo) break;
-        chosen = again;
-        tries++;
-      }}
-
-      currentPhoto = chosen.photo;
-      updateMeta(currentPhoto);
-      drawPreview(currentPhoto);
-    }}
-
-    document.getElementById('rerollBtn').addEventListener('click', onRerollSameDay);
-
-    // 默认进入：如果从 review 点进来，则显示该照片；否则提示用户从 review 进入
-    const initPhoto = findSelectedPhoto();
-    if (!initPhoto) {{
-      updateMeta(null);
-      drawPreview(null);
-    }} else {{
-      currentDate = initPhoto.date;
-      currentPhoto = initPhoto;
-      updateMeta(currentPhoto);
-      drawPreview(currentPhoto);
-    }}
-  </script>
-</body>
-</html>
-"""
-    return html_str
-
-
-# --------------------------
-# Routes
-# --------------------------
-
-@app.get("/")
-def index():
-    if ENABLE_REVIEW_WEBUI:
-        return redirect("/review")
-    return Response("InkTime server running. WebUI disabled.", mimetype="text/plain; charset=utf-8")
-
-
-@app.get("/review")
-def review():
-    _require_webui_enabled()
-    try:
-        page = int(request.args.get("page", "1"))
-    except Exception:
-        page = 1
-
-    md = (request.args.get('md', '') or '').strip()
-    sort = (request.args.get('sort', '') or 'memory').strip() or 'memory'
-
-    rows, total_count = load_rows(page=page, page_size=REVIEW_PAGE_SIZE, md=md, sort=sort)
-    if not rows:
-        return Response(
-            "数据库里没有可展示的数据。请先运行你的分析脚本生成评分与文案。",
-            status=404,
-            mimetype="text/plain; charset=utf-8",
-        )
-
-    html_str = build_html(rows, page=page, page_size=REVIEW_PAGE_SIZE, total_count=total_count)
-    return Response(html_str, mimetype="text/html; charset=utf-8")
-
-
-# API endpoint for md list
-@app.get('/api/md_list')
-def api_md_list():
-    _require_webui_enabled()
-    md_list = _load_all_md_list()
-    return Response(json.dumps(md_list, ensure_ascii=False), mimetype='application/json; charset=utf-8')
-
-
-@app.get("/sim")
-def sim():
-    _require_webui_enabled()
-    selected_img = request.args.get("img", "")
-
-    # 默认不再全库加载，避免 /sim 页面巨大 JSON 导致浏览器转圈
-    sim_rows = []
-
-    # 仅当从 /review 点进来且参数合法时，按“该日期 + 向前 30 天”加载
-    if selected_img and isinstance(selected_img, str) and selected_img.startswith("/images/"):
-        subpath = selected_img[len("/images/"):]
-        try:
-            p = _safe_join(IMAGE_DIR, subpath)
-        except Exception:
-            p = None
-
-        if p is not None and p.exists() and p.is_file():
-            meta = get_photo_meta_by_path(str(p))
-            base_date = meta.get("date") if meta else ""
-
-            if base_date:
-                try:
-                    from datetime import datetime, timedelta
-                    dt0 = datetime.strptime(base_date, "%Y-%m-%d")
-                    dates = [(dt0 - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(0, 31)]
-                except Exception:
-                    dates = [base_date]
-
-                sim_rows = load_sim_rows_for_dates(dates)
-
-    html_str = build_simulator_html(sim_rows, selected_img=selected_img)
-    return Response(html_str, mimetype="text/html; charset=utf-8")
-
-
-@app.get("/images/<path:subpath>")
-def images(subpath: str):
-    _require_webui_enabled()
-    try:
-        p = _safe_join(IMAGE_DIR, subpath)
-    except Exception:
-        abort(400)
-    return _send_static_file(p)
-
-@app.get("/sim_render")
-def sim_render():
-    _require_webui_enabled()
-
-    img_uri = request.args.get("img", "")
-    if not img_uri or not img_uri.startswith("/images/"):
-        abort(400)
-
-    subpath = img_uri[len("/images/"):]
-    try:
-        p = _safe_join(IMAGE_DIR, subpath)
-    except Exception:
-        abort(400)
-
-    if not p.exists() or not p.is_file():
-        abort(404)
-
-    meta = get_photo_meta_by_path(str(p))
-    if meta is None:
-        # 兜底：DB 没命中就渲染纯图（不建议长期这样）
-        meta = {
-            "path": str(p),
-            "date": "",
-            "side": "",
-            "memory": None,
-            "lat": None,
-            "lon": None,
-            "city": "",
+try:
+    import config as cfg
+except ModuleNotFoundError:
+    cfg = object()
+
+
+def _resolve_path(path: str | Path, *, base: Path = ROOT_DIR) -> Path:
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = base / resolved
+    return resolved.resolve()
+
+
+def _config_value(name: str, default: Any) -> Any:
+    return getattr(cfg, name, default)
+
+
+def _load_manifest(render_output_dir: Path) -> dict[str, Any]:
+    manifest_path = render_output_dir / "manifest.json"
+    if not manifest_path.exists():
+        return {
+            "width": _config_value("RENDER_WIDTH", 800),
+            "height": _config_value("RENDER_HEIGHT", 432),
+            "final_width": _config_value("RENDER_WIDTH", 800),
+            "final_height": _config_value("FINAL_RENDER_HEIGHT", 480),
+            "caption_height": _config_value("CAPTION_BAR_HEIGHT", 48),
+            "mode": _config_value("RENDER_MODE", "scale"),
+            "dither": _config_value("DITHER_MODE", "atkinson"),
+            "renders": [],
         }
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
 
+
+def _read_review_rows(db_path: Path, limit: int = 200) -> list[sqlite3.Row]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     try:
-        img = rdp.render_image(meta)
-        img_dithered = rdp.apply_four_color_dither(img)
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(photo_scores)").fetchall()
+        }
+        analysis_channel_expr = (
+            "analysis_channel" if "analysis_channel" in columns else "'' AS analysis_channel"
+        )
+        analysis_model_expr = (
+            "analysis_model" if "analysis_model" in columns else "'' AS analysis_model"
+        )
+        location_hint_expr = (
+            "location_hint" if "location_hint" in columns else "'' AS location_hint"
+        )
+        return conn.execute(
+            f"""
+            SELECT path,
+                   caption,
+                   type,
+                   memory_score,
+                   beauty_score,
+                   reason,
+                   side_caption,
+                   exif_city,
+                   {location_hint_expr},
+                   {analysis_channel_expr},
+                   {analysis_model_expr}
+            FROM photo_scores
+            ORDER BY COALESCE(memory_score, -1) DESC,
+                     COALESCE(beauty_score, -1) DESC,
+                     path ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
 
-        bio = BytesIO()
-        img_dithered.save(bio, format="PNG")
-        bio.seek(0)
-        return send_file(bio, mimetype="image/png", as_attachment=False)
-    except Exception:
-        abort(500)
 
-@app.get("/static/inktime/<key>/photo_<int:idx>.bin")
-def esp_photo(key: str, idx: int):
-    if key != DOWNLOAD_KEY:
-        abort(404)
-    if idx < 0 or idx >= DAILY_PHOTO_QUANTITY:
-        abort(404)
-    p = BIN_OUTPUT_DIR / f"photo_{idx}.bin"
-    return _send_static_file(p)
+def _esc(value: Any) -> str:
+    return html.escape(str(value or ""))
 
 
-@app.get("/static/inktime/<key>/latest.bin")
-def esp_latest(key: str):
-    if key != DOWNLOAD_KEY:
-        abort(404)
-    p = BIN_OUTPUT_DIR / "latest.bin"
-    return _send_static_file(p)
-
-
-@app.get("/static/inktime/<key>/preview.png")
-def esp_preview(key: str):
-    if key != DOWNLOAD_KEY:
-        abort(404)
-    p = BIN_OUTPUT_DIR / "preview.png"
-    return _send_static_file(p)
-
-
-@app.get("/files/")
-@app.get("/files/<path:subpath>")
-def browse(subpath: str = ""):
-    _require_webui_enabled()
+def _fmt_score(value: Any) -> str:
+    if value is None or value == "":
+        return "-"
     try:
-        p = _safe_join(BIN_OUTPUT_DIR, subpath)
-    except Exception:
-        abort(400)
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return str(value)
 
-    if p.is_file():
-        return _send_static_file(p)
 
-    if not p.exists() or not p.is_dir():
-        abort(404)
+def _score_width(value: Any) -> int:
+    try:
+        return max(0, min(100, round(float(value))))
+    except (TypeError, ValueError):
+        return 0
 
-    items = []
-    for child in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-        name = child.name + ("/" if child.is_dir() else "")
-        rel = child.relative_to(BIN_OUTPUT_DIR)
-        href = "/files/" + str(rel).replace("\\", "/")
-        items.append(f'<li><a href="{html.escape(href)}">{html.escape(name)}</a></li>')
 
-    up = ""
-    if p != BIN_OUTPUT_DIR:
-        parent_rel = p.parent.relative_to(BIN_OUTPUT_DIR)
-        up_href = "/files/" + str(parent_rel).replace("\\", "/")
-        up = f'<a href="{html.escape(up_href)}">⬅ 返回上级</a><br><br>'
+def _json_attr(value: Any) -> str:
+    return html.escape(json.dumps(value, ensure_ascii=False), quote=True)
 
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def _short_path(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    path = Path(text)
+    parts = path.parts
+    if len(parts) >= 3:
+        return str(Path(*parts[-3:]))
+    return text
+
+
+def _type_pills(value: Any) -> str:
+    raw = str(value or "未分类")
+    labels = [part.strip() for part in re.split(r"[/,，、\s]+", raw) if part.strip()]
+    if not labels:
+        labels = ["未分类"]
+    return "".join(f'<span class="pill">{_esc(label)}</span>' for label in labels[:4])
+
+
+def _channel_badge(value: Any) -> str:
+    channel = str(value or "").strip()
+    if not channel:
+        return ""
+    return f'<span class="chip">分析 {_esc(channel)}</span>'
+
+
+def _display_side_caption(item: dict[str, Any]) -> str:
+    side = str(item.get("side_caption") or "").strip()
+    if 4 <= len(side) <= 30 and "照片" not in side and "画面" not in side:
+        return side
+    caption = str(item.get("caption") or "")
+    ptype = str(item.get("type") or "")
+    combined = f"{ptype} {caption}"
+    if any(word in combined for word in ("孩子", "儿童", "小女孩", "小朋友")):
+        return "小手忙着搭一座新城"
+    if any(word in combined for word in ("猫", "宠物", "狗")):
+        return "它把日常占成了主角"
+    if any(word in combined for word in ("旅行", "风景", "山", "海", "湖")):
+        return "风景替脚步留了证词"
+    if any(word in combined for word in ("美食", "餐", "饭", "菜")):
+        return "胃先替记忆点了头"
+    return "日常在这里轻轻落座"
+
+
+def _display_location(item: dict[str, Any]) -> str:
+    return str(item.get("exif_city") or "").strip()
+
+
+def _page(title: str, body: str, *, active: str = "dashboard") -> str:
+    active_dashboard = "active" if active == "dashboard" else ""
+    active_gallery = "active" if active == "gallery" else ""
+    active_studio = "active" if active == "studio" else ""
+    active_settings = "active" if active == "settings" else ""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<title>InkTime Files</title>
-<style>
-body {{ font-family: -apple-system,BlinkMacSystemFont,system-ui,sans-serif; padding: 24px; }}
-ul {{ line-height: 1.8; }}
-code {{ background:#f2f2f2; padding:2px 6px; border-radius:4px; }}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<h3>输出目录浏览</h3>
-<p>当前：<code>{html.escape(str(p.relative_to(BIN_OUTPUT_DIR) if p != BIN_OUTPUT_DIR else "."))}</code></p>
-{up}
-<ul>
-{''.join(items)}
-</ul>
+  <div class="app-shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="mark" href="/" aria-label="InkTime PhotoPainter">
+        <span class="mark-dot"></span>
+        <span>InkTime</span>
+      </a>
+      <nav class="rail-nav">
+        <a class="{active_dashboard}" href="/">
+          <span class="nav-icon">⌂</span>
+          <span>中控台</span>
+        </a>
+        <a class="{active_gallery}" href="/gallery">
+          <span class="nav-icon">▦</span>
+          <span>画廊</span>
+        </a>
+        <a class="{active_studio}" href="/push-studio">
+          <span class="nav-icon">□</span>
+          <span>推送工作台</span>
+        </a>
+        <a class="{active_settings}" href="/settings">
+          <span class="nav-icon">◌</span>
+          <span>设置</span>
+        </a>
+      </nav>
+      <div class="rail-note">
+        <span class="status-dot"></span>
+        本地 WebUI<br>
+        真实数据驱动
+      </div>
+    </aside>
+    <main class="workspace">
+      <header class="topbar">
+        <div class="hero-title">
+          <p class="hero-script">Warmth Archive</p>
+          <h1>收集散落的人间暖意，定格每一段时光</h1>
+          <p class="hero-subline">照片瀑布流｜批量预览｜设备推送</p>
+        </div>
+      </header>
+      {body}
+    </main>
+  </div>
+  <script>
+    (() => {{
+      const syncDetailPanels = () => {{
+        document.querySelectorAll(".detail-grid").forEach((grid) => {{
+          const preview = grid.querySelector(".preview-panel");
+          const info = grid.querySelector(".info-panel");
+          if (!preview || !info) return;
+          if (window.matchMedia("(max-width: 900px)").matches) {{
+            info.style.height = "";
+            return;
+          }}
+          info.style.height = `${{Math.round(preview.getBoundingClientRect().height)}}px`;
+        }});
+      }};
+      window.pushRender = async (renderId) => {{
+        const headers = {{}};
+        const savedToken = sessionStorage.getItem("inktimePushToken");
+        if (savedToken) headers["X-Push-Token"] = savedToken;
+        let response = await fetch(`/api/push/manual/${{renderId}}`, {{ method: "POST", headers }});
+        if (response.status === 401) {{
+          const token = window.prompt("请输入推送 token");
+          if (!token) return;
+          sessionStorage.setItem("inktimePushToken", token);
+          response = await fetch(`/api/push/manual/${{renderId}}`, {{
+            method: "POST",
+            headers: {{ "X-Push-Token": token }}
+          }});
+        }}
+        const data = await response.json().catch(() => ({{ ok: false, error: "响应解析失败" }}));
+        if (!response.ok || !data.ok) {{
+          window.alert(`推送失败：${{data.error || response.statusText}}`);
+          return;
+        }}
+        window.alert(`已推送，墨水屏可下载 ${{data.image_url}}\\n浏览器预览 ${{data.preview_url}}`);
+      }};
+      window.addEventListener("load", syncDetailPanels);
+      window.addEventListener("resize", syncDetailPanels);
+      if ("ResizeObserver" in window) {{
+        document.querySelectorAll(".preview-panel").forEach((panel) => {{
+          new ResizeObserver(syncDetailPanels).observe(panel);
+        }});
+      }}
+      syncDetailPanels();
+    }})();
+  </script>
+  <script src="/static/app.js"></script>
 </body>
-</html>
-"""
+</html>"""
+
+
+def _render_renders_page(manifest: dict[str, Any]) -> str:
+    renders = manifest.get("renders", [])
+    width = manifest.get("final_width") or manifest.get("width", 800)
+    height = manifest.get("final_height") or manifest.get("height", 480)
+    mode = manifest.get("mode", "scale")
+    dither = manifest.get("dither", "atkinson")
+    generated_at = manifest.get("generated_at", "")
+    body: list[str] = [
+        f"""
+        <section class="hero">
+          <div>
+            <h1>本地渲染画廊</h1>
+            <p class="lead">查看 AI 分析后的照片，以及按 PhotoPainter E6 六色算法生成的本地预览成品。</p>
+          </div>
+          <div class="stats">
+            <span class="chip">{len(renders)} 张</span>
+            <span class="chip">{_esc(width)}x{_esc(height)}</span>
+            <span class="chip">模式 {_esc(mode)}</span>
+            <span class="chip">抖动 {_esc(dither)}</span>
+          </div>
+        </section>
+        """
+    ]
+    if generated_at:
+        body.append(f'<p class="small">生成时间：{_esc(generated_at)}</p>')
+    if not renders:
+        body.append(
+            '<div class="empty">还没有渲染成品。请先运行 <code>python render_photopainter.py</code>。</div>'
+        )
+        return "".join(body)
+
+    body.append('<section class="gallery-grid">')
+    for idx, item in enumerate(renders):
+        render_png = str(item.get("render_png", ""))
+        side = _display_side_caption(item)
+        caption = str(item.get("caption") or "")
+        source_path = _short_path(item.get("source_path"))
+        city = _display_location(item)
+        date = str(item.get("exif_date") or "")
+        type_text = str(item.get("type") or "未分类")
+        analysis_channel = str(item.get("analysis_channel") or "")
+        memory = _fmt_score(item.get("memory_score"))
+        beauty = _fmt_score(item.get("beauty_score"))
+        meta = " · ".join(part for part in [date, city, type_text, analysis_channel] if part)
+        body.append(
+            f"""
+            <a class="render-card" href="/renders/{idx}">
+              <img class="thumb" src="/static/renders/{_esc(render_png)}" alt="{_esc(render_png)}">
+              <div class="card-copy">
+                <p class="caption">{_esc(side)}</p>
+                <p class="small">{_esc(caption)}</p>
+                <p class="small">{_esc(source_path)}</p>
+                <p class="small">{_esc(meta)}</p>
+                <div class="score-line">
+                  <span>回忆度: {_esc(memory)}</span>
+                  <span>美观度: {_esc(beauty)}</span>
+                </div>
+              </div>
+            </a>
+            """
+        )
+    body.append("</section>")
+    return "".join(body)
+
+
+def _render_detail_page(manifest: dict[str, Any], item: dict[str, Any], item_id: int) -> str:
+    render_png = str(item.get("render_png", ""))
+    render_bmp = str(item.get("render_bmp", ""))
+    side = _display_side_caption(item)
+    caption = str(item.get("caption") or "")
+    reason = str(item.get("reason") or "暂无评分理由。")
+    source_path = str(item.get("source_path") or "")
+    analysis_channel = str(item.get("analysis_channel") or "")
+    analysis_model = str(item.get("analysis_model") or "")
+    crop_focus = item.get("crop_focus")
+    crop_focus_text = json.dumps(crop_focus, ensure_ascii=False) if crop_focus else "-"
+    location = _display_location(item)
+    location_html = (
+        f'<span class="paper-location"><img src="/static/location.svg" alt="" aria-hidden="true"><span>{_esc(location)}</span></span>'
+        if location
+        else ""
+    )
+    image_width = manifest.get("width", 800)
+    image_height = manifest.get("height", 432)
+    final_width = manifest.get("final_width") or image_width
+    final_height = manifest.get("final_height") or 480
+    mode = manifest.get("mode", "scale")
+    dither = manifest.get("dither", "atkinson")
+    memory = item.get("memory_score")
+    beauty = item.get("beauty_score")
+    meta_rows = [
+        ("原图路径", source_path),
+        ("EXIF 日期", item.get("exif_date") or "-"),
+        ("城市/地点", _display_location(item) or "-"),
+        ("渲染文件", render_png),
+        ("BMP 文件", render_bmp or "-"),
+        ("最终尺寸", f"{final_width}x{final_height}（含文字条）"),
+        ("图像区", f"{image_width}x{image_height}"),
+        ("渲染参数", f"{mode} / {dither}"),
+        ("分析通道", analysis_channel or "-"),
+        ("分析模型", analysis_model or "-"),
+        ("裁切关注区", crop_focus_text),
+    ]
+    detail_items = "".join(
+        f"<div><strong>{_esc(label)}：</strong>{_esc(value)}</div>" for label, value in meta_rows
+    )
+    return f"""
+    <section class="hero">
+      <div>
+        <h1>渲染效果预览</h1>
+        <p class="lead">单张照片的六色渲染结果、AI 描述和评分理由。</p>
+      </div>
+      <div class="stats">
+        <a class="button" href="/renders">返回画廊</a>
+        <a class="button" href="/render/{item_id}">重新渲染</a>
+      </div>
+    </section>
+    <section class="detail-grid">
+      <div class="preview-panel">
+        <img src="/static/renders/{_esc(render_png)}" alt="{_esc(render_png)}">
+        <div class="paper-caption"><span class="paper-caption-text">{_esc(side)}</span>{location_html}</div>
+      </div>
+      <aside class="info-panel">
+        <h2 class="quote-title">「{_esc(side)}」</h2>
+        <div class="pills">{_type_pills(item.get("type"))}{_channel_badge(analysis_channel)}</div>
+        <p class="description">{_esc(caption)}</p>
+        <div class="score-row">
+          <span class="muted">回忆度</span>
+          <div class="bar"><span style="--value: {_score_width(memory)}%"></span></div>
+          <strong>{_esc(_fmt_score(memory))}</strong>
+        </div>
+        <div class="score-row">
+          <span class="muted">美观度</span>
+          <div class="bar"><span style="--value: {_score_width(beauty)}%"></span></div>
+          <strong>{_esc(_fmt_score(beauty))}</strong>
+        </div>
+        <div class="reason">
+          <strong>评分理由</strong>
+          <div class="muted">{_esc(reason)}</div>
+        </div>
+        <details>
+          <summary>更多信息</summary>
+          <div class="detail-list">{detail_items}</div>
+        </details>
+        <div class="actions">
+          <a class="button" href="/source/{item_id}">查看原图</a>
+          <a class="button" href="/static/renders/{_esc(render_png)}">打开 PNG</a>
+          <button class="button" type="button" onclick="pushRender({item_id})">手动推送</button>
+        </div>
+      </aside>
+    </section>
+    """
+
+
+def _render_review_page(rows: list[sqlite3.Row]) -> str:
+    if not rows:
+        return '<div class="empty">还没有分析结果。请先运行 <code>python analyze_photos.py -j 1 --debug</code>。</div>'
+
+    body = [
+        """
+        <section class="hero">
+          <div>
+            <h1>照片分析结果</h1>
+            <p class="lead">按回忆度和美观度排序查看入库结果。</p>
+          </div>
+          <div class="stats"><span class="chip">最多 200 条</span></div>
+        </section>
+        <table><thead><tr><th>评分</th><th>文案</th><th>来源</th></tr></thead><tbody>
+        """
+    ]
+    for row in rows:
+        score = f"回忆 {_fmt_score(row['memory_score'])}<br>美观 {_fmt_score(row['beauty_score'])}"
+        caption = _esc(row["side_caption"] or row["caption"])
+        details = _esc(row["reason"])
+        source = _esc(row["path"])
+        channel = _esc(row["analysis_channel"])
+        body.append(
+            f"<tr><td>{score}<br><span class='small'>{channel}</span></td><td><strong>{caption}</strong><br><span class='small'>{details}</span></td><td class='small'>{source}</td></tr>"
+        )
+    body.append("</tbody></table>")
+    return "".join(body)
+
+
+def _render_dashboard_page(status: dict[str, Any]) -> str:
+    recent_push = status.get("recent_push") or {}
+    preview_url = str(recent_push.get("preview_url") or "")
+    recent_time = str(recent_push.get("pushed_at") or "暂无推送")
+    recent_caption = str(recent_push.get("side_caption") or recent_push.get("source_path") or "还没有设备成品")
+    recent_photo_id = recent_push.get("photo_id")
+    recent_studio_href = f"/push-studio/{_esc(recent_photo_id)}" if recent_photo_id else "/push-studio"
+    state_label = "分析完成" if status.get("analyzed_photos") else "等待分析"
+    state_copy = (
+        f"{_esc(status.get('analyzed_photos'))} 张照片已入库，可以进入画廊筛选"
+        if status.get("analyzed_photos")
+        else "还没有已分析照片，先完成扫描与 AI 分析"
+    )
+    progress = 100
+    if status.get("monitored_files"):
+        progress = round((int(status.get("analyzed_photos") or 0) / int(status["monitored_files"])) * 100)
+        progress = max(0, min(100, progress))
+    latest_body = (
+        f"""
+        <div class="push-preview">
+          <img src="{_esc(preview_url)}" alt="最近推送的六色预览">
+          <div>
+            <strong>{_esc(recent_caption)}</strong>
+            <p>{_esc(recent_time)}</p>
+            <a class="ghost-button compact" href="{recent_studio_href}">调整这张图</a>
+          </div>
+        </div>
+        """
+        if preview_url
+        else '<div class="empty">暂无最近推送。先从画廊选择一张照片进入推送工作台。</div>'
+    )
+    return f"""
+    <section class="screen dashboard-screen" aria-labelledby="dashboard-title">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">Dashboard</p>
+          <h2 id="dashboard-title">状态中控台</h2>
+        </div>
+        <div class="directory-chip" title="监控目录">{_esc(status.get("monitor_dir"))}</div>
+      </div>
+
+      <section class="status-band">
+        <div class="status-copy">
+          <span class="state-label good">{_esc(state_label)}</span>
+          <h3>{state_copy}</h3>
+          <p>本地模型可用时优先使用；失败后自动切换云端通道。缺失照片只标记，不自动删除。</p>
+        </div>
+        <div class="status-meter" aria-label="分析进度">
+          <div class="meter-head">
+            <span>分析进度</span>
+            <strong>{progress}%</strong>
+          </div>
+          <div class="meter"><span style="width: {progress}%"></span></div>
+        </div>
+      </section>
+
+      <section class="metric-grid" aria-label="照片库统计">
+        <article class="metric-tile">
+          <span>监控照片</span>
+          <strong>{_esc(status.get("monitored_files"))}</strong>
+          <small>当前目录可用于 AI 计算</small>
+        </article>
+        <article class="metric-tile">
+          <span>已分析</span>
+          <strong>{_esc(status.get("analyzed_photos"))}</strong>
+          <small>已写入数据库</small>
+        </article>
+        <article class="metric-tile">
+          <span>待分析估算</span>
+          <strong>{_esc(status.get("unanalyzed_estimate"))}</strong>
+          <small>按监控目录估算</small>
+        </article>
+        <article class="metric-tile warning">
+          <span>缺失标记</span>
+          <strong>{_esc(status.get("missing_photos"))}</strong>
+          <small>等待人工清理</small>
+        </article>
+      </section>
+
+      <section class="dashboard-grid">
+        <div class="action-dock" aria-label="快捷操作">
+          <button class="dock-action primary" type="button" disabled title="分析任务控制将在后续阶段接入">开始 / 暂停分析</button>
+          <button class="dock-action" type="button" disabled title="照片库扫描任务将在后续阶段接入">重新扫描照片库</button>
+          <button class="dock-action" type="button" disabled title="分析任务控制将在后续阶段接入">停止分析</button>
+          <a class="dock-action" href="/gallery">进入画廊</a>
+          <a class="dock-action" href="/settings">模型设置</a>
+        </div>
+
+        <article class="latest-push" aria-label="最近推送">
+          <div class="panel-head">
+            <div>
+              <p class="kicker">Latest Push</p>
+              <h3>最近推送</h3>
+            </div>
+            <span class="state-label">{_esc(recent_push.get("trigger_type") or "无记录")}</span>
+          </div>
+          {latest_body}
+        </article>
+
+        <article class="log-panel" aria-label="运行日志">
+          <div class="panel-head">
+            <div>
+              <p class="kicker">Log</p>
+              <h3>运行日志</h3>
+            </div>
+            <button class="text-button" type="button" data-log-toggle aria-expanded="true" aria-controls="dashboard-log-list">折叠</button>
+          </div>
+          <ol class="log-list" id="dashboard-log-list">
+            <li><time>就绪</time><span>本地 WebUI 已启动。</span></li>
+            <li><time>数据库</time><span>已分析 {_esc(status.get("analyzed_photos"))} 张照片。</span></li>
+            <li><time>目录</time><span>发现 {_esc(status.get("monitored_files"))} 个可用图片文件。</span></li>
+            <li><time>缺失</time><span>{_esc(status.get("missing_photos"))} 张照片被标记 missing。</span></li>
+          </ol>
+        </article>
+      </section>
+    </section>
+    """
+
+
+def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int) -> str:
+    sort_options = [
+        ("score", "综合分最高"),
+        ("date", "拍摄日期新到旧"),
+        ("rendered", "最近渲染"),
+        ("discovery", "推送选片规则"),
+    ]
+    options = "".join(
+        f'<option value="{_esc(value)}" {"selected" if value == sort else ""}>{_esc(label)}</option>'
+        for value, label in sort_options
+    )
+    cards: list[str] = []
+    modals: list[str] = []
+    photo_ids = [int(photo["photo_id"]) for photo in photos if photo.get("photo_id") is not None]
+    for index, photo in enumerate(photos):
+        photo_id = int(photo.get("photo_id"))
+        score = _fmt_score(photo.get("score"))
+        memory = _fmt_score(photo.get("memory_score"))
+        beauty = _fmt_score(photo.get("beauty_score"))
+        meta = " · ".join(
+            part
+            for part in [
+                str(photo.get("exif_date") or ""),
+                str(photo.get("exif_city") or ""),
+                str(photo.get("type") or "未分类"),
+            ]
+            if part
+        )
+        meta_items = "".join(
+            f"<li><strong>{_esc(label)}</strong><span>{_esc(value)}</span></li>"
+            for label, value in [
+                ("类型", photo.get("type") or "未分类"),
+                ("日期", photo.get("exif_date") or "-"),
+                ("地点", photo.get("exif_city") or "-"),
+                ("模型", photo.get("analysis_channel") or "-"),
+            ]
+        )
+        prev_id = photo_ids[index - 1] if index > 0 and index - 1 < len(photo_ids) else photo_ids[-1]
+        next_id = photo_ids[index + 1] if index + 1 < len(photo_ids) else photo_ids[0]
+        shape = " tall" if index % 5 in {0, 4} else " wide" if index % 5 == 2 else ""
+        cards.append(
+            f"""
+            <article class="photo-card{shape}" tabindex="0">
+              <a class="push-float" href="/push-studio/{_esc(photo_id)}">加入推送</a>
+              <a class="photo-image-link" href="#photo-{_esc(photo_id)}" aria-label="打开照片详情">
+                <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}" loading="lazy">
+              </a>
+              <div class="photo-copy">
+                <div class="score-pair"><span>{_esc(score)}</span><small>综合分</small></div>
+                <h3>{_esc(photo.get("side_caption"))}</h3>
+                <p class="small">{_esc(meta or "暂无日期/地点")}</p>
+              </div>
+            </article>
+            """
+        )
+        modals.append(
+            f"""
+            <article class="photo-lightbox" id="photo-{_esc(photo_id)}" role="dialog" aria-modal="true" aria-labelledby="photo-title-{_esc(photo_id)}">
+              <a class="lightbox-backdrop" href="#gallery-title" aria-label="关闭详情"></a>
+              <div class="lightbox-card">
+                <a class="lightbox-close" href="#gallery-title" aria-label="关闭详情">×</a>
+                <a class="lightbox-arrow prev" href="#photo-{_esc(prev_id)}" aria-label="上一张">‹</a>
+                <a class="lightbox-arrow next" href="#photo-{_esc(next_id)}" aria-label="下一张">›</a>
+                <p class="lightbox-label">Photo #{_esc(photo_id)}</p>
+                <div class="lightbox-grid">
+                  <figure class="lightbox-preview">
+                    <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
+                    <figcaption>{_esc(photo.get("side_caption"))}</figcaption>
+                    <ul class="detail-meta-strip">{meta_items}</ul>
+                  </figure>
+                  <aside class="lightbox-analysis">
+                    <h2 id="photo-title-{_esc(photo_id)}">AI 分析</h2>
+                    <p class="description">{_esc(photo.get("caption"))}</p>
+                    <div class="score-row">
+                      <span class="muted">回忆度</span>
+                      <div class="bar"><span style="--value: {_score_width(photo.get("memory_score"))}%"></span></div>
+                      <strong>{_esc(memory)}</strong>
+                    </div>
+                    <div class="score-row">
+                      <span class="muted">美观度</span>
+                      <div class="bar"><span style="--value: {_score_width(photo.get("beauty_score"))}%"></span></div>
+                      <strong>{_esc(beauty)}</strong>
+                    </div>
+                    <div class="reason">
+                      <strong>评分理由</strong>
+                      <div class="muted">{_esc(photo.get("reason"))}</div>
+                    </div>
+                    <a class="primary-button push-entry" href="/push-studio/{_esc(photo_id)}">进入推送工作台</a>
+                  </aside>
+                </div>
+              </div>
+            </article>
+            """
+        )
+    if not cards:
+        cards.append(
+            """
+            <div class="empty">
+              还没有可展示的已分析照片。可能是数据库为空、照片被标记 missing，或监控目录暂时不可读。
+            </div>
+            """
+        )
+    return f"""
+    <section class="screen gallery-screen" aria-labelledby="gallery-title">
+      <div class="section-heading sticky-heading">
+        <div>
+          <p class="kicker">Gallery</p>
+          <h2 id="gallery-title">已分析照片瀑布流</h2>
+        </div>
+        <form class="toolbar" method="get" action="/gallery">
+          <label>
+            <span>排序</span>
+            <select name="sort" onchange="this.form.submit()">{options}</select>
+          </label>
+          <input type="hidden" name="limit" value="{_esc(limit)}">
+          <button class="ghost-button" type="submit">刷新候选</button>
+        </form>
+      </div>
+      <section class="masonry" aria-label="照片列表">{"".join(cards)}</section>
+      {"".join(modals)}
+    </section>
+    """
+
+
+def _render_photo_database_detail(photo: dict[str, Any]) -> str:
+    meta = " · ".join(
+        part
+        for part in [
+            str(photo.get("exif_date") or ""),
+            str(photo.get("exif_city") or ""),
+            str(photo.get("type") or "未分类"),
+            str(photo.get("analysis_channel") or ""),
+        ]
+        if part
+    )
+    meta_items = "".join(
+        f"<li><strong>{_esc(label)}</strong><span>{_esc(value)}</span></li>"
+        for label, value in [
+            ("类型", photo.get("type") or "未分类"),
+            ("日期", photo.get("exif_date") or "-"),
+            ("地点", photo.get("exif_city") or "-"),
+            ("模型", photo.get("analysis_channel") or "-"),
+        ]
+    )
+    ai_side_caption = str(photo.get("ai_side_caption") or "")
+    custom_side_caption = str(photo.get("custom_side_caption") or "")
+    return f"""
+    <section class="screen photo-detail-screen">
+      <div class="detail-page-head">
+        <span class="status-kicker">Photo #{_esc(photo.get("photo_id"))}</span>
+        <div class="actions">
+          <a class="button" href="/gallery">返回画廊</a>
+          <a class="primary-button" href="/push-studio/{_esc(photo.get("photo_id"))}">进入推送工作台</a>
+        </div>
+      </div>
+      <section class="detail-grid">
+        <div class="preview-panel">
+          <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}">
+          <div class="paper-caption"><span class="paper-caption-text">{_esc(photo.get("side_caption"))}</span></div>
+          <ul class="detail-meta-strip">{meta_items}</ul>
+        </div>
+        <aside class="info-panel">
+          <h2>AI 分析</h2>
+          <p class="small">{_esc(meta or "暂无日期/地点")}</p>
+          <p class="description">{_esc(photo.get("caption"))}</p>
+          <div class="score-row">
+            <span class="muted">回忆度</span>
+            <div class="bar"><span style="--value: {_score_width(photo.get("memory_score"))}%"></span></div>
+            <strong>{_esc(_fmt_score(photo.get("memory_score")))}</strong>
+          </div>
+          <div class="score-row">
+            <span class="muted">美观度</span>
+            <div class="bar"><span style="--value: {_score_width(photo.get("beauty_score"))}%"></span></div>
+            <strong>{_esc(_fmt_score(photo.get("beauty_score")))}</strong>
+          </div>
+          <div class="reason">
+            <strong>评分理由</strong>
+            <div class="muted">{_esc(photo.get("reason"))}</div>
+          </div>
+          <section class="detail-caption-editor" data-detail-caption-editor data-save-url="/api/photos/{_esc(photo.get('photo_id'))}/overrides">
+            <h3>文案微调</h3>
+            <p class="small"><strong>AI 原始短文案</strong><br>{_esc(ai_side_caption or '暂无')}</p>
+            <label class="field-stack"><span>人工文案</span><textarea rows="3" data-detail-caption-input>{_esc(custom_side_caption or ai_side_caption)}</textarea></label>
+            <div class="detail-caption-actions"><button class="button" type="button" data-detail-caption-save>保存文案</button><span class="small" data-detail-caption-state aria-live="polite">{_esc('已应用人工覆盖' if custom_side_caption else '当前使用 AI 文案')}</span></div>
+          </section>
+        </aside>
+      </section>
+    </section>
+    """
+
+
+def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
+    saved_crop = _json_object(photo.get("manual_crop_json"))
+    crop = {
+        "scale": 1.0,
+        "offset_x": saved_crop.get("offset_x", saved_crop.get("x", 0)),
+        "offset_y": saved_crop.get("offset_y", saved_crop.get("y", 0)),
+        "rotation": 0,
+        "fit_mode": "fill",
+        **saved_crop,
+    }
+    render_overrides = {
+        "show_caption": True,
+        "show_date": True,
+        "show_location": True,
+        "frame_orientation": "landscape",
+        "dither_enabled": True,
+        "dither_type": str(_config_value("DITHER_MODE", "atkinson")),
+        "dither_strength": 1.0,
+        "brightness": float(_config_value("BRIGHTNESS", 1.1)),
+        "contrast": float(_config_value("CONTRAST", 1.2)),
+        "saturation": float(_config_value("SATURATION", 1.2)),
+        **normalize_render_overrides(photo.get("render_overrides_json")),
+    }
+    caption = str(photo.get("custom_side_caption") or photo.get("side_caption") or "")
+    exif_date = str(photo.get("exif_date") or "")
+    exif_city = str(photo.get("exif_city") or "")
+    meta = " · ".join(
+        part
+        for part in [
+            f"Photo #{photo.get('photo_id')}",
+            str(photo.get("exif_date") or ""),
+            str(photo.get("exif_city") or ""),
+            str(photo.get("type") or "未分类"),
+        ]
+        if part
+    )
+    return f"""
+    <section class="screen studio-screen" data-push-studio data-display-defaults-version="2" data-photo-id="{_esc(photo.get("photo_id"))}" data-save-url="/api/photos/{_esc(photo.get("photo_id"))}/overrides" data-push-url="/api/photos/{_esc(photo.get("photo_id"))}/push" data-source-url="{_esc(photo.get("source_url"))}" data-crop="{_json_attr(crop)}" data-render="{_json_attr(render_overrides)}" data-date="{_esc(exif_date)}" data-location="{_esc(exif_city)}">
+      <div class="studio-head">
+        <div>
+        <p class="status-kicker">Push Studio</p>
+          <h2>单张推送工作台</h2>
+          <p class="small">{_esc(meta)}</p>
+        </div>
+        <a class="button" href="/gallery">返回画廊</a>
+      </div>
+      <section class="detail-grid studio-workspace">
+      <div class="studio-stage-card">
+        <div class="device-editor" tabindex="0" data-editor-stage aria-label="推送构图编辑器">
+          <canvas class="editor-canvas" data-editor-canvas width="800" height="480" aria-label="完整设备成品的六色转换预览"></canvas>
+          <div class="editor-loading" data-editor-loading>正在载入原图...</div>
+          <div class="editor-safe-frame" aria-hidden="true"></div>
+        </div>
+        <div class="stage-footnote">
+          <p class="stage-hint">拖动原图调整位置，滚轮以光标为中心缩放。六色预览直接使用当前构图，不会先裁切原图。</p>
+          <span class="preview-mode" data-preview-mode>六色预览</span>
+        </div>
+      </div>
+      <aside class="info-panel studio-controls">
+        <div class="studio-control-head">
+          <div><p class="status-kicker">Photo Conversion</p><h2>照片转换</h2></div>
+          <label class="preview-switch"><input type="checkbox" data-dither-enabled {"checked" if render_overrides.get("dither_enabled") else ""}><span>六色预览</span></label>
+        </div>
+        <section class="studio-control-section" aria-labelledby="composition-label">
+          <h3 id="composition-label">构图</h3>
+          <div class="select-row"><span>相框摆放</span><div class="frame-orientation-control" aria-label="相框摆放方向"><button class="button" type="button" data-frame-orientation="landscape">横放</button><button class="button" type="button" data-frame-orientation="portrait">竖放</button></div></div>
+          <label class="select-row"><span>适配方式</span><select data-fit-mode><option value="fill" {"selected" if crop.get("fit_mode") == "fill" else ""}>填满画布</option><option value="contain" {"selected" if crop.get("fit_mode") == "contain" else ""}>完整显示</option></select></label>
+          <label class="range-row wide-range"><span>缩放</span><input type="range" min="0.1" max="3" step="0.01" value="{_esc(crop.get("scale"))}" data-zoom-input><strong data-zoom-value>1.00</strong></label>
+          <div class="position-readout"><span>水平 <strong data-pan-x>0</strong></span><span>垂直 <strong data-pan-y>0</strong></span></div>
+          <div class="compact-actions"><button class="button" type="button" data-fit-button>自动适配</button><button class="button" type="button" data-rotate-button>照片旋转 90°</button><button class="button" type="button" data-reset-button>重置</button></div>
+        </section>
+        <section class="studio-control-section" aria-labelledby="render-label">
+          <div class="control-title-row"><h3 id="render-label">六色渲染</h3><button class="text-button" type="button" data-auto-button>自动配置</button></div>
+          <label class="select-row"><span>抖动算法</span><select data-dither-type><option value="atkinson" {"selected" if render_overrides.get("dither_type") == "atkinson" else ""}>PhotoPainter Atkinson（推荐）</option><option value="floyd-steinberg" {"selected" if render_overrides.get("dither_type") == "floyd-steinberg" else ""}>Floyd-Steinberg</option><option value="atkinson-standard" {"selected" if render_overrides.get("dither_type") == "atkinson-standard" else ""}>Atkinson（标准）</option><option value="stucki" {"selected" if render_overrides.get("dither_type") == "stucki" else ""}>Stucki</option><option value="jarvis-judice-ninke" {"selected" if render_overrides.get("dither_type") == "jarvis-judice-ninke" else ""}>Jarvis-Judice-Ninke</option></select></label>
+          <label class="range-row parameter-range"><span>抖动强度</span><input type="range" min="0" max="5" step="0.1" value="{_esc(render_overrides.get("dither_strength"))}" data-dither-strength><strong data-dither-strength-value>1.0</strong></label>
+          <label class="range-row parameter-range"><span>亮度</span><input type="range" min="0.5" max="1.8" step="0.05" value="{_esc(render_overrides.get("brightness"))}" data-brightness><strong data-brightness-value>1.10</strong></label>
+          <label class="range-row parameter-range"><span>对比度</span><input type="range" min="0.5" max="2" step="0.05" value="{_esc(render_overrides.get("contrast"))}" data-contrast><strong data-contrast-value>1.20</strong></label>
+          <label class="range-row parameter-range"><span>饱和度</span><input type="range" min="0" max="2" step="0.05" value="{_esc(render_overrides.get("saturation"))}" data-saturation><strong data-saturation-value>1.20</strong></label>
+        </section>
+        <section class="studio-control-section" aria-labelledby="caption-label">
+          <h3 id="caption-label">文字排版</h3>
+          <label class="field-stack"><span>文案</span><textarea rows="3" data-caption-input>{_esc(caption)}</textarea></label>
+          <div class="check-grid" aria-label="显示内容"><label><input type="checkbox" data-toggle-caption {"checked" if render_overrides.get("show_caption") else ""}> 文案</label><label><input type="checkbox" data-toggle-date {"checked" if render_overrides.get("show_date") else ""}> 日期</label><label><input type="checkbox" data-toggle-location {"checked" if render_overrides.get("show_location") else ""}> 地点</label></div>
+        </section>
+        <div class="studio-primary-actions"><button class="button" type="button" data-save-button>保存参数</button><button class="primary-button" type="button" data-push-button>生成并推送</button></div>
+        <p class="save-state" data-save-state aria-live="polite"></p>
+      </aside>
+      </section>
+    </section>
+    """
+
+
+def _render_settings_page() -> str:
+    return """
+    <section class="screen settings-screen" aria-labelledby="settings-title">
+      <div class="section-heading">
+        <div>
+          <p class="kicker">Settings Preview</p>
+          <h2 id="settings-title">配置页视觉草案</h2>
+        </div>
+      </div>
+      <div class="settings-layout">
+        <article class="setting-row">
+          <div>
+            <h3>local_lmstudio</h3>
+            <p>本地模型通道；真实模型名和 URL 来自本地配置。</p>
+          </div>
+          <span class="state-label good">可用性待测</span>
+        </article>
+        <article class="setting-row">
+          <div>
+            <h3>cloud_qwen</h3>
+            <p>云端兜底通道；前端不展示真实 API key。</p>
+          </div>
+          <span class="state-label">兜底</span>
+        </article>
+        <article class="setting-row">
+          <div>
+            <h3>画廊批量偏好</h3>
+            <p>批量选择只在选择模式中展开，画廊主视图保持浏览优先。</p>
+          </div>
+          <label class="setting-control">默认选择前 <input class="mini-input" type="number" value="20"> 张</label>
+        </article>
+        <article class="setting-note">
+          <strong>密钥不在前端显示</strong>
+          <p>配置页只展示通道、模型、URL、timeout 和连通性状态；真实 API key 继续来自 config.py 或 NAS .env。</p>
+        </article>
+      </div>
+    </section>
+    """
+
+
+def create_app(
+    *,
+    db_path: str | Path | None = None,
+    render_output_dir: str | Path | None = None,
+) -> Flask:
+    app = Flask(__name__)
+    db = _resolve_path(db_path or _config_value("DB_PATH", "./photos.db"))
+    render_dir = _resolve_path(
+        render_output_dir or _config_value("RENDER_OUTPUT_DIR", "./output/photopainter")
+    )
+    push_dir = _resolve_path(_config_value("PUSH_OUTPUT_DIR", "./output/push"))
+    ensure_photo_identity_schema(db)
+    ensure_push_schema(db)
+
+    def push_token_error():
+        token = str(_config_value("PUSH_API_TOKEN", "") or "")
+        if token and request.headers.get("X-Push-Token", "") != token:
+            return jsonify({"ok": False, "error": "推送 token 错误或缺失"}), 401
+        return None
+
+    @app.get("/")
+    def index():
+        status = load_status(
+            db,
+            monitor_dir=_resolve_path(_config_value("IMAGE_DIR", "./sample_photos")),
+            push_dir=push_dir,
+        )
+        return _page("InkTime 状态中控台", _render_dashboard_page(status), active="dashboard")
+
+    @app.get("/healthz")
+    def healthz():
+        return jsonify({"ok": True})
+
+    @app.get("/api/status")
+    def api_status():
+        return jsonify(
+            load_status(
+                db,
+                monitor_dir=_resolve_path(_config_value("IMAGE_DIR", "./sample_photos")),
+                push_dir=push_dir,
+            )
+        )
+
+    @app.get("/gallery")
+    def gallery():
+        sort = str(request.args.get("sort", "score"))
+        limit = min(200, max(1, int(request.args.get("limit", 60))))
+        photos = load_photos(
+            db,
+            limit=limit,
+            sort=sort,
+            random_seed=str(request.args.get("seed") or ""),
+        )
+        return _page(
+            "InkTime 画廊",
+            _render_gallery_page(photos, sort=sort, limit=limit),
+            active="gallery",
+        )
+
+    @app.get("/api/photos")
+    def api_photos():
+        sort = str(request.args.get("sort", "score"))
+        limit = min(200, max(1, int(request.args.get("limit", 60))))
+        include_missing = request.args.get("include_missing") in {"1", "true", "yes"}
+        return jsonify(
+            {
+                "ok": True,
+                "photos": load_photos(
+                    db,
+                    limit=limit,
+                    sort=sort,
+                    include_missing=include_missing,
+                    random_seed=str(request.args.get("seed") or ""),
+                ),
+            }
+        )
+
+    @app.get("/api/photos/<int:photo_id>")
+    def api_photo_detail(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None:
+            abort(404)
+        return jsonify({"ok": True, "photo": photo})
+
+    @app.get("/api/photos/<int:photo_id>/source")
+    def photo_source(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        target = Path(str(photo.get("path") or "")).expanduser()
+        if not target.exists() or not target.is_file():
+            abort(404)
+        return send_file(target)
+
+    @app.route("/api/photos/<int:photo_id>/overrides", methods=["POST", "PATCH"])
+    def save_photo_overrides(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None:
+            abort(404)
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+
+        caption = (
+            str(payload.get("custom_side_caption") or "").strip()
+            if "custom_side_caption" in payload
+            else str(photo.get("custom_side_caption") or "").strip()
+        )
+        manual_crop = (
+            _json_object(payload.get("manual_crop_json"))
+            if "manual_crop_json" in payload
+            else _json_object(photo.get("manual_crop_json"))
+        )
+        render_overrides = (
+            _json_object(payload.get("render_overrides_json"))
+            if "render_overrides_json" in payload
+            else _json_object(photo.get("render_overrides_json"))
+        )
+        render_overrides["display_defaults_version"] = 2
+        updated_at = _utc_now()
+
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                """
+                INSERT INTO photo_overrides
+                (photo_id, custom_side_caption, manual_crop_json, render_overrides_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(photo_id) DO UPDATE SET
+                  custom_side_caption = excluded.custom_side_caption,
+                  manual_crop_json = excluded.manual_crop_json,
+                  render_overrides_json = excluded.render_overrides_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    photo_id,
+                    caption or None,
+                    json.dumps(manual_crop, ensure_ascii=False, sort_keys=True),
+                    json.dumps(render_overrides, ensure_ascii=False, sort_keys=True),
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return jsonify(
+            {
+                "ok": True,
+                "photo_id": photo_id,
+                "custom_side_caption": caption,
+                "manual_crop_json": manual_crop,
+                "render_overrides_json": render_overrides,
+                "updated_at": updated_at,
+            }
+        )
+
+    @app.post("/api/photos/<int:photo_id>/push")
+    def push_photo(photo_id: int):
+        auth_error = push_token_error()
+        if auth_error is not None:
+            return auth_error
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        item = dict(photo)
+        item["source_path"] = str(photo.get("path") or "")
+        item["side_caption"] = str(
+            photo.get("custom_side_caption") or photo.get("side_caption") or ""
+        )
+        item["crop_focus"] = _json_object(photo.get("crop_focus_json"))
+        settings = settings_from_config(
+            db_path=db,
+            render_output_dir=render_dir,
+            push_output_dir=push_dir,
+        )
+        try:
+            manifest = write_latest_files(
+                item,
+                settings=settings,
+                trigger_type="manual",
+                note=f"WebUI photo_id={photo_id}",
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "photo_id": photo_id, "manifest": manifest})
+
+    @app.get("/photos/<int:photo_id>")
+    def photo_detail(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        return _page("照片详情", _render_photo_database_detail(photo), active="gallery")
+
+    @app.get("/push-studio/<int:photo_id>")
+    def push_studio(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        return _page("单张推送工作台", _render_push_studio_placeholder(photo), active="studio")
+
+    @app.get("/push-studio")
+    def push_studio_index():
+        photos = load_photos(db, limit=1)
+        if photos:
+            return redirect(f"/push-studio/{photos[0]['photo_id']}")
+        return redirect("/gallery")
+
+    @app.get("/settings")
+    def settings():
+        return _page("配置页视觉草案", _render_settings_page(), active="settings")
+
+    @app.get("/renders")
+    def renders():
+        manifest = _load_manifest(render_dir)
+        return _page("PhotoPainter 渲染成品", _render_renders_page(manifest), active="gallery")
+
+    @app.get("/renders/<int:item_id>")
+    def render_detail(item_id: int):
+        manifest = _load_manifest(render_dir)
+        renders = manifest.get("renders", [])
+        if item_id < 0 or item_id >= len(renders):
+            abort(404)
+        return _page(
+            "渲染效果预览",
+            _render_detail_page(manifest, renders[item_id], item_id),
+            active="studio",
+        )
+
+    @app.get("/review")
+    def review():
+        rows = _read_review_rows(db)
+        return _page("照片分析结果", _render_review_page(rows), active="dashboard")
+
+    @app.get("/static/renders/<path:filename>")
+    def render_static(filename: str):
+        target = (render_dir / filename).resolve()
+        if render_dir not in target.parents and target != render_dir:
+            abort(404)
+        if not target.exists() or not target.is_file():
+            abort(404)
+        return send_file(target)
+
+    @app.get("/push/<path:filename>")
+    def push_static(filename: str):
+        allowed = {"latest.bmp", "latest.png", "manifest.json"}
+        if filename not in allowed:
+            abort(404)
+        target = (push_dir / filename).resolve()
+        if push_dir not in target.parents and target != push_dir:
+            abort(404)
+        if not target.exists() or not target.is_file():
+            abort(404)
+        return send_file(target)
+
+    @app.get("/source/<int:item_id>")
+    def source(item_id: int):
+        manifest = _load_manifest(render_dir)
+        renders = manifest.get("renders", [])
+        if item_id < 0 or item_id >= len(renders):
+            abort(404)
+        target = Path(str(renders[item_id].get("source_path", ""))).expanduser()
+        if not target.exists() or not target.is_file():
+            abort(404)
+        return send_file(target)
+
+    @app.get("/render/<int:item_id>")
+    def rerender(item_id: int):
+        limit = item_id + 1
+        render_from_database(
+            db_path=db,
+            output_dir=render_dir,
+            limit=limit,
+            width=int(request.args.get("width", _config_value("RENDER_WIDTH", 800))),
+            height=int(request.args.get("height", _config_value("RENDER_HEIGHT", 432))),
+            final_height=int(_config_value("FINAL_RENDER_HEIGHT", 480)),
+            caption_height=int(_config_value("CAPTION_BAR_HEIGHT", 48)),
+            mode=str(request.args.get("mode", _config_value("RENDER_MODE", "scale"))),
+            dither=str(request.args.get("dither", _config_value("DITHER_MODE", "atkinson"))),
+            brightness=float(request.args.get("brightness", _config_value("BRIGHTNESS", 1.1))),
+            contrast=float(request.args.get("contrast", _config_value("CONTRAST", 1.2))),
+            saturation=float(request.args.get("saturation", _config_value("SATURATION", 1.2))),
+            save_bmp=bool(_config_value("SAVE_BMP_OUTPUT", True)),
+            font_path=str(_config_value("FONT_PATH", "")),
+        )
+        return redirect(f"/renders/{item_id}")
+
+    @app.post("/api/push/manual/<int:item_id>")
+    def push_manual(item_id: int):
+        auth_error = push_token_error()
+        if auth_error is not None:
+            return auth_error
+        settings = PushSettings(
+            db_path=db,
+            render_output_dir=render_dir,
+            push_output_dir=push_dir,
+            width=int(_config_value("RENDER_WIDTH", 800)),
+            image_height=int(_config_value("RENDER_HEIGHT", 432)),
+            final_height=int(_config_value("FINAL_RENDER_HEIGHT", 480)),
+            caption_height=int(_config_value("CAPTION_BAR_HEIGHT", 48)),
+            mode=str(_config_value("RENDER_MODE", "scale")),
+            dither=str(_config_value("DITHER_MODE", "atkinson")),
+            brightness=float(_config_value("BRIGHTNESS", 1.1)),
+            contrast=float(_config_value("CONTRAST", 1.2)),
+            saturation=float(_config_value("SATURATION", 1.2)),
+            font_path=str(_config_value("FONT_PATH", "")) or None,
+            timezone=str(_config_value("PUSH_TIMEZONE", "Asia/Shanghai")),
+            exclude_days=int(_config_value("PUSH_EXCLUDE_DAYS", 90)),
+        )
+        try:
+            manifest = publish_render(
+                item_id,
+                settings=settings,
+                trigger_type="manual",
+            )
+        except IndexError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except FileNotFoundError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"BMP 生成失败：{exc}"}), 500
+        return jsonify({"ok": True, **manifest})
+
+    return app
+
+
+app = create_app()
 
 
 if __name__ == "__main__":
-    mimetypes.add_type("application/octet-stream", ".bin")
-    print(f"[InkTime] DB: {DB_PATH}")
-    print(f"[InkTime] IMAGE_DIR: {IMAGE_DIR}")
-    print(f"[InkTime] OUT: {BIN_OUTPUT_DIR}")
-    print(f"[InkTime] key: {DOWNLOAD_KEY}")
-    print(f"[InkTime] listen: {FLASK_HOST}:{FLASK_PORT}")
-    print(f"[InkTime] open: http://127.0.0.1:{FLASK_PORT}/  (本机)")
-    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False)
+    host = str(_config_value("FLASK_HOST", "127.0.0.1"))
+    port = int(_config_value("FLASK_PORT", 8765))
+    app.run(host=host, port=port, debug=False)

@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>InkTime PhotoPainter WebUI Mockup</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <!--
+  THESIS: A photo operations desk, not a desktop clone or dark review gallery.
+  OWN-WORLD: Pale mineral surfaces, sharp black type, PhotoPainter six-color accents, real family photos, dense-but-calm tool panels.
+  STORY: The user sees system health, discovers analyzed memories, edits one artifact, and pushes a device-ready BMP without leaving the workspace.
+  FIRST VIEWPORT: Left rail, top command bar, live status band, scan metrics, latest push preview, discovery strip, and compact log.
+  FORM: Operate-mode production control room with gallery studio flow, shaped from docs/refactor-plan.md; static mockup only.
+  -->
+  <div class="app-shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="mark" href="#dashboard" aria-label="InkTime PhotoPainter">
+        <span class="mark-dot"></span>
+        <span>InkTime</span>
+      </a>
+      <nav class="rail-nav">
+        <a class="active" href="#dashboard">
+          <span class="nav-icon">⌂</span>
+          <span>中控台</span>
+        </a>
+        <a href="#gallery">
+          <span class="nav-icon">▦</span>
+          <span>画廊</span>
+        </a>
+        <a href="#studio">
+          <span class="nav-icon">□</span>
+          <span>推送工作台</span>
+        </a>
+        <a href="#settings">
+          <span class="nav-icon">◌</span>
+          <span>设置</span>
+        </a>
+      </nav>
+      <div class="rail-note">
+        <span class="status-dot"></span>
+        WebUI 设计稿<br>
+        不连接真实 API
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="hero-title">
+          <p class="hero-script">Warmth Archive</p>
+          <h1>收集散落的人间暖意，定格每一段时光</h1>
+          <p class="hero-subline">照片瀑布流｜批量预览｜设备推送</p>
+        </div>
+      </header>
+
+      <section id="dashboard" class="screen dashboard-screen" aria-labelledby="dashboard-title">
+        <div class="section-heading">
+          <div>
+            <p class="kicker">Dashboard</p>
+            <h2 id="dashboard-title">状态中控台</h2>
+          </div>
+          <div class="directory-chip" title="监控目录">D:/资料/照片/xx</div>
+        </div>
+
+        <section class="status-band">
+          <div class="status-copy">
+            <span class="state-label good">分析完成</span>
+            <h3>30882 张照片已入库，可以生成设备预览</h3>
+            <p>本地模型可用时优先使用；失败后自动切换云端通道。缺失照片只标记，不自动删除。</p>
+          </div>
+          <div class="status-meter" aria-label="分析进度">
+            <div class="meter-head">
+              <span>分析进度</span>
+              <strong>100%</strong>
+            </div>
+            <div class="meter"><span style="width: 100%"></span></div>
+          </div>
+        </section>
+
+        <section class="metric-grid" aria-label="照片库统计">
+          <article class="metric-tile">
+            <span>监控照片</span>
+            <strong>30882</strong>
+            <small>今天扫描完成</small>
+          </article>
+          <article class="metric-tile">
+            <span>含 GPS</span>
+            <strong>17248</strong>
+            <small>55% 可显示地点</small>
+          </article>
+          <article class="metric-tile">
+          <span>推荐候选</span>
+          <strong>129</strong>
+          <small>历史上的今天优先</small>
+          </article>
+          <article class="metric-tile warning">
+            <span>缺失标记</span>
+            <strong>12</strong>
+            <small>等待人工清理</small>
+          </article>
+        </section>
+
+        <section class="dashboard-grid">
+          <div class="action-dock" aria-label="快捷操作">
+            <button class="dock-action primary">开始 / 暂停分析</button>
+            <button class="dock-action">重新扫描照片库</button>
+            <button class="dock-action">停止分析</button>
+            <button class="dock-action">立即生成预览</button>
+            <button class="dock-action">进入画廊</button>
+            <button class="dock-action">模型设置</button>
+            <button class="dock-action">打开输出目录</button>
+          </div>
+
+          <article class="latest-push" aria-label="最近推送">
+            <div class="panel-head">
+              <div>
+                <p class="kicker">Latest Push</p>
+                <h3>最近推送</h3>
+              </div>
+              <span class="state-label">07:00 自动</span>
+            </div>
+            <div class="push-preview">
+              <img src="../../output/photopainter/render_001.png" alt="最近推送的六色预览">
+              <div>
+                <strong>两个小孩凑近镜头，像在审查一台可疑的白色小机器。</strong>
+                <p>木渎镇 · 2026-04-05 · cloud_qwen</p>
+                <button class="ghost-button compact">进入工作台</button>
+              </div>
+            </div>
+          </article>
+
+          <article class="log-panel" aria-label="运行日志">
+            <div class="panel-head">
+              <div>
+                <p class="kicker">Log</p>
+                <h3>运行日志</h3>
+              </div>
+              <button class="text-button">折叠</button>
+            </div>
+            <ol class="log-list">
+              <li><time>22:19:57</time><span>程序启动，本地 WebUI 已就绪。</span></li>
+              <li><time>22:19:57</time><span>检测到 LM Studio，AI 功能可用。</span></li>
+              <li><time>22:20:03</time><span>扫描完成，共发现 30882 张照片。</span></li>
+              <li><time>22:20:03</time><span>所有照片已分析完成，无需重复分析。</span></li>
+            </ol>
+          </article>
+        </section>
+      </section>
+
+      <section id="gallery" class="screen gallery-screen" aria-labelledby="gallery-title">
+        <div class="section-heading sticky-heading">
+          <div>
+            <p class="kicker">Gallery</p>
+            <h2 id="gallery-title">已分析照片瀑布流</h2>
+          </div>
+          <div class="toolbar">
+            <label>
+              <span>排序</span>
+              <select>
+                <option>综合分最高</option>
+                <option>拍摄日期新到旧</option>
+                <option>最近渲染</option>
+                <option>推送选片规则</option>
+              </select>
+            </label>
+            <button class="ghost-button">刷新候选</button>
+          </div>
+        </div>
+
+        <div class="masonry" aria-label="照片列表">
+          <article class="photo-card tall">
+            <button class="push-float">加入推送</button>
+            <img src="../../sample_photos/IMG_0408.JPG" alt="孩子倒立与成人互动">
+            <div class="photo-copy">
+              <div class="score-pair"><span>184.1</span><small>综合分</small></div>
+              <h3>小孩倒立才是真正的行走说明书</h3>
+              <p>长征镇 · 2026-04-26 · 孩子/家庭</p>
+            </div>
+          </article>
+          <article class="photo-card">
+            <button class="push-float">加入推送</button>
+            <img src="../../sample_photos/IMG_0265.JPG" alt="两个孩子操作白色相机">
+            <div class="photo-copy">
+              <div class="score-pair"><span>179.1</span><small>综合分</small></div>
+              <h3>两个小孩凑近镜头，审查一台白色小机器</h3>
+              <p>木渎镇 · 2026-04-05 · cloud_qwen</p>
+            </div>
+          </article>
+          <article class="photo-card wide">
+            <button class="push-float">加入推送</button>
+            <img src="../../sample_photos/IMG_0253.JPG" alt="樱花树下的两个孩子">
+            <div class="photo-copy">
+              <div class="score-pair"><span>174.8</span><small>综合分</small></div>
+              <h3>春天在他们手里分成了两份</h3>
+              <p>木渎镇 · 2026-04-04 · 旅行/风景</p>
+            </div>
+          </article>
+          <article class="photo-card">
+            <button class="push-float">加入推送</button>
+            <img src="../../sample_photos/IMG_3747.JPG" alt="生日玩偶摆拍">
+            <div class="photo-copy">
+              <div class="score-pair"><span>180.8</span><small>综合分</small></div>
+              <h3>三只毛绒朋友认真执行生日礼仪</h3>
+              <p>生日 · 玩偶 · 个性化名字牌</p>
+            </div>
+          </article>
+          <article class="photo-card tall">
+            <button class="push-float">加入推送</button>
+            <img src="../../sample_photos/IMG_0271.JPG" alt="女孩举着草莓">
+            <div class="photo-copy">
+              <div class="score-pair"><span>170.8</span><small>综合分</small></div>
+              <h3>草莓举在眼前，像在问你确定要吃掉我</h3>
+              <p>木渎镇 · 采摘 · 日常</p>
+            </div>
+          </article>
+          <article class="photo-card">
+            <button class="push-float">加入推送</button>
+            <img src="../../sample_photos/IMG_9054.JPG" alt="女孩和木制玩具">
+            <div class="photo-copy">
+              <div class="score-pair"><span>166.0</span><small>综合分</small></div>
+              <h3>小手忙着搭一座新城</h3>
+              <p>上海 · 2025-11-02 · local_lmstudio</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="studio" class="screen studio-screen" aria-labelledby="studio-title">
+        <div class="section-heading">
+          <div>
+            <p class="kicker">Push Studio</p>
+            <h2 id="studio-title">单张推送工作台</h2>
+          </div>
+          <div class="top-actions">
+            <button class="ghost-button">保存参数</button>
+            <button class="primary-button">推送到 latest.bmp</button>
+          </div>
+        </div>
+
+        <div class="studio-layout">
+          <section class="device-stage" aria-label="设备预览">
+            <div class="device-meta">
+              <span>设备成品预览</span>
+              <strong>800 × 480 · Atkinson</strong>
+            </div>
+            <div class="paper-frame">
+              <img src="../../output/photopainter/render_001.png" alt="六色墨水屏成品预览">
+              <div class="caption-strip">
+                <span>两个小孩凑近镜头，像在审查一台可疑的白色小机器。</span>
+                <small>木渎镇</small>
+              </div>
+            </div>
+            <p class="stage-hint">设计预留电脑端操作：鼠标拖动平移，滚轮缩放。当前 mockup 只展示视觉状态。</p>
+          </section>
+
+          <aside class="control-stack" aria-label="渲染参数">
+            <section class="control-group">
+              <div class="panel-head">
+                <h3>文案</h3>
+                <span class="state-label good">人工覆盖</span>
+              </div>
+              <textarea rows="4">两个小孩凑近镜头，像在审查一台可疑的白色小机器。</textarea>
+            </section>
+
+            <section class="control-group">
+              <h3>构图</h3>
+              <div class="segment-control" role="group" aria-label="裁切模式">
+                <button class="selected">填充裁切</button>
+                <button>完整留边</button>
+              </div>
+              <label class="range-row"><span>缩放</span><input type="range" value="118" min="80" max="180"><strong>1.18</strong></label>
+              <label class="range-row"><span>水平</span><input type="range" value="54" min="0" max="100"><strong>+4</strong></label>
+              <label class="range-row"><span>垂直</span><input type="range" value="46" min="0" max="100"><strong>-2</strong></label>
+            </section>
+
+            <section class="control-group">
+              <h3>六色渲染</h3>
+              <label class="select-row"><span>抖动算法</span><select><option>Atkinson</option><option>Floyd-Steinberg</option></select></label>
+              <label class="range-row"><span>亮度</span><input type="range" value="110" min="70" max="150"><strong>1.10</strong></label>
+              <label class="range-row"><span>对比度</span><input type="range" value="120" min="70" max="160"><strong>1.20</strong></label>
+              <label class="range-row"><span>饱和度</span><input type="range" value="120" min="60" max="180"><strong>1.20</strong></label>
+            </section>
+
+            <section class="control-group">
+              <h3>显示内容</h3>
+              <label class="checkline"><input type="checkbox" checked> 显示文案</label>
+              <label class="checkline"><input type="checkbox" checked> 显示地点</label>
+              <label class="checkline"><input type="checkbox"> 显示日期</label>
+              <button class="wide-button">生成预览</button>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section id="settings" class="screen settings-screen" aria-labelledby="settings-title">
+        <div class="section-heading">
+          <div>
+            <p class="kicker">Settings Preview</p>
+            <h2 id="settings-title">配置页视觉草案</h2>
+          </div>
+        </div>
+        <div class="settings-layout">
+          <article class="setting-row">
+            <div>
+              <h3>local_lmstudio</h3>
+              <p>http://127.0.0.1:9100 · google/gemma-4-31b-qat:2</p>
+            </div>
+            <span class="state-label good">可用</span>
+          </article>
+          <article class="setting-row">
+            <div>
+              <h3>cloud_qwen</h3>
+              <p>compatible-mode/v1/chat/completions · qwen3-vl-plus</p>
+            </div>
+            <span class="state-label">兜底</span>
+          </article>
+          <article class="setting-row">
+            <div>
+              <h3>画廊批量偏好</h3>
+              <p>批量选择只在选择模式中展开，画廊主视图保持浏览优先。</p>
+            </div>
+            <label class="setting-control">默认选择前 <input class="mini-input" type="number" value="20"> 张</label>
+          </article>
+          <article class="setting-note">
+            <strong>密钥不在前端显示</strong>
+            <p>配置页只展示通道、模型、URL、timeout 和连通性状态；真实 API key 继续来自 `config.py` 或 NAS `.env`。</p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
