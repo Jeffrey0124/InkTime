@@ -59,7 +59,7 @@ sudo docker compose run --rm worker scheduler.py --run-once --slot 07:00
 使用同一镜像中的 worker 验证 NAS 服务，避免依赖 NAS 宿主机的 Python 和 Pillow 环境：
 
 ```bash
-sudo docker compose run --rm worker python scripts/validate_webui.py --base-url http://web:8766
+sudo docker compose run --rm worker scripts/validate_webui.py --base-url http://web:8766
 ```
 
 也可以在已安装本项目依赖的电脑上运行脚本，并把 `--base-url` 设置为 `http://<NAS-IP>:8766`。
