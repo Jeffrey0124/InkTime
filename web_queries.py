@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import random
 import sqlite3
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,29 @@ def _score(memory_score: Any, beauty_score: Any) -> float:
     except (TypeError, ValueError):
         beauty = 0.0
     return memory + beauty
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+
+def _is_anniversary(exif_date: Any, today: date) -> bool:
+    captured = _parse_iso_date(exif_date)
+    return captured is not None and (captured.month, captured.day) == (today.month, today.day)
+
+
+def _is_not_recent(last_rendered_at: Any, cutoff: date) -> bool:
+    last_rendered = _parse_iso_date(last_rendered_at)
+    return last_rendered is None or last_rendered < cutoff
 
 
 def _count_monitor_files(monitor_dir: Path) -> int:
@@ -187,6 +211,8 @@ def load_photos(
     sort: str = "score",
     include_missing: bool = False,
     random_seed: str | None = None,
+    exclude_days: int = 90,
+    today: date | None = None,
     photo_id: int | None = None,
 ) -> list[dict[str, Any]]:
     if limit <= 0:
@@ -211,6 +237,19 @@ def load_photos(
         exif_gps_alt_expr = _optional_column(score_columns, "exif_gps_alt", "NULL")
         where_clause = "WHERE p.id = ?" if photo_id is not None else ""
         query_params = (photo_id,) if photo_id is not None else ()
+        has_push_history = _table_exists(conn, "push_history")
+        push_history_join = """
+            LEFT JOIN (
+              SELECT source_path, MAX(pushed_at) AS last_pushed_at
+              FROM push_history
+              GROUP BY source_path
+            ) ph ON ph.source_path = p.path
+        """ if has_push_history else ""
+        last_rendered_expr = (
+            "COALESCE(ph.last_pushed_at, '') AS last_rendered_at"
+            if has_push_history
+            else "COALESCE(ra.last_used_at, '') AS last_rendered_at"
+        )
 
         rows = conn.execute(
             f"""
@@ -239,7 +278,7 @@ def load_photos(
                    o.render_overrides_json,
                    ra.preview_png_path,
                    ra.bmp_path,
-                   ra.last_used_at
+                   {last_rendered_expr}
             FROM photos p
             JOIN photo_scores s ON s.path = p.path
             LEFT JOIN photo_overrides o ON o.photo_id = p.id
@@ -251,6 +290,7 @@ def load_photos(
               FROM render_assets
               GROUP BY photo_id
             ) ra ON ra.photo_id = p.id
+            {push_history_join}
             {where_clause}
             """
             , query_params
@@ -297,7 +337,7 @@ def load_photos(
                 "render_overrides_json": row["render_overrides_json"] or "",
                 "exists_on_disk": bool(row["exists_on_disk"]),
                 "status": row["status"],
-                "last_rendered_at": row["last_used_at"] or "",
+                "last_rendered_at": row["last_rendered_at"] or "",
                 "preview_png_path": row["preview_png_path"] or "",
                 "bmp_path": row["bmp_path"] or "",
             }
@@ -305,8 +345,23 @@ def load_photos(
 
     if sort in {"random", "discovery", "push_rule"}:
         photos = [item for item in photos if float(item["score"]) >= 60]
+        active_today = today or datetime.now().astimezone().date()
+        cutoff = active_today - timedelta(days=max(0, exclude_days))
+        anniversary_tier: list[dict[str, Any]] = []
+        not_recent_tier: list[dict[str, Any]] = []
+        fallback_tier: list[dict[str, Any]] = []
+        for item in photos:
+            if _is_anniversary(item["exif_date"], active_today):
+                anniversary_tier.append(item)
+            elif _is_not_recent(item["last_rendered_at"], cutoff):
+                not_recent_tier.append(item)
+            else:
+                fallback_tier.append(item)
         rng = random.Random(random_seed)
-        rng.shuffle(photos)
+        tiers = (anniversary_tier, not_recent_tier, fallback_tier)
+        for tier in tiers:
+            rng.shuffle(tier)
+        photos = [item for tier in tiers for item in tier]
     elif sort == "date":
         photos.sort(key=lambda item: (item["exif_date"] or "", item["path"]), reverse=True)
     elif sort == "rendered":
