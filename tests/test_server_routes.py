@@ -117,7 +117,11 @@ class ServerRoutesTests(unittest.TestCase):
 
                 home = client.get("/")
                 self.assertEqual(home.status_code, 200)
-                self.assertIn("状态中控台", home.get_data(as_text=True))
+                home_html = home.get_data(as_text=True)
+                self.assertIn("状态中控台", home_html)
+                self.assertIn('data-log-toggle aria-expanded="true"', home_html)
+                self.assertIn('type="button" disabled title="照片库扫描任务将在后续阶段接入"', home_html)
+                self.assertNotIn('href="/api/status">重新扫描照片库', home_html)
 
                 status = client.get("/api/status")
                 self.assertEqual(status.status_code, 200)

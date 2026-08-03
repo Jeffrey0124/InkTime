@@ -544,8 +544,21 @@
     });
   };
 
+  const initDashboardLog = (button) => {
+    const listId = button.getAttribute("aria-controls");
+    const list = listId ? document.getElementById(listId) : null;
+    if (!list) return;
+    button.addEventListener("click", () => {
+      const expanded = button.getAttribute("aria-expanded") === "true";
+      button.setAttribute("aria-expanded", String(!expanded));
+      button.textContent = expanded ? "展开" : "折叠";
+      list.hidden = expanded;
+    });
+  };
+
   document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll("[data-push-studio]").forEach(initPushStudio);
     document.querySelectorAll("[data-detail-caption-editor]").forEach(initDetailCaptionEditor);
+    document.querySelectorAll("[data-log-toggle]").forEach(initDashboardLog);
   });
 })();

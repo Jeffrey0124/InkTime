@@ -564,9 +564,9 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
 
       <section class="dashboard-grid">
         <div class="action-dock" aria-label="快捷操作">
-          <button class="dock-action primary" type="button">开始 / 暂停分析</button>
-          <a class="dock-action" href="/api/status">重新扫描照片库</a>
-          <button class="dock-action" type="button">停止分析</button>
+          <button class="dock-action primary" type="button" disabled title="分析任务控制将在后续阶段接入">开始 / 暂停分析</button>
+          <button class="dock-action" type="button" disabled title="照片库扫描任务将在后续阶段接入">重新扫描照片库</button>
+          <button class="dock-action" type="button" disabled title="分析任务控制将在后续阶段接入">停止分析</button>
           <a class="dock-action" href="/gallery">进入画廊</a>
           <a class="dock-action" href="/settings">模型设置</a>
         </div>
@@ -588,9 +588,9 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
               <p class="kicker">Log</p>
               <h3>运行日志</h3>
             </div>
-            <button class="text-button" type="button">折叠</button>
+            <button class="text-button" type="button" data-log-toggle aria-expanded="true" aria-controls="dashboard-log-list">折叠</button>
           </div>
-          <ol class="log-list">
+          <ol class="log-list" id="dashboard-log-list">
             <li><time>就绪</time><span>本地 WebUI 已启动。</span></li>
             <li><time>数据库</time><span>已分析 {_esc(status.get("analyzed_photos"))} 张照片。</span></li>
             <li><time>目录</time><span>发现 {_esc(status.get("monitored_files"))} 个可用图片文件。</span></li>
