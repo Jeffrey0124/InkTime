@@ -166,8 +166,9 @@ InkTime PhotoPainter Local 的界面是一张安静的照片工作台：它有�
 
 ## Typography
 
-**Display Font:** Segoe UI / Microsoft YaHei / Arial  
-**Body Font:** Segoe UI / Microsoft YaHei / Arial  
+**Display Font:** Segoe UI / Microsoft YaHei / Arial
+
+**Body Font:** Segoe UI / Microsoft YaHei / Arial
 **Script Accent:** Georgia / Times New Roman italic
 
 **Character:** 中文标题要有力量和温度，像给个人照片档案命名；正文和控件必须像工具一样直接、可扫读。英文只作为轻量装饰或系统分区名，不抢中文信息主位。
