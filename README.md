@@ -13,9 +13,11 @@
    从 `photo_scores` 读取高分照片，按 PhotoPainter 7.3 寸 Spectra 6 屏幕风格渲染为六色图片。
 
 3. `server.py`
-   提供本地 WebUI：
-   - `http://127.0.0.1:8766/renders` 查看渲染成品
-   - `http://127.0.0.1:8766/review` 查看分析结果
+   提供数据库驱动的本地 WebUI：
+   - `http://127.0.0.1:8766/` 查看状态中控台
+   - `http://127.0.0.1:8766/gallery` 浏览已分析照片
+   - `/photos/<photo_id>` 查看照片详情并微调文案
+   - `/push-studio/<photo_id>` 调整构图和六色参数并手动推送
 
 ## 环境准备
 
@@ -82,7 +84,7 @@ API_CHANNELS = [
 - `model_name` 必须和 LM Studio 的 `/v1/models` 返回的 `id` 一致；如果只加载了 `google/gemma-4-12b-qat`，就不要填 `google/gemma-4-31b-qat`。
 - 本地模型不可用、超过该通道 `timeout`、HTTP 错误或主分析 JSON 缺字段/分数不可解析时，自动请求 `cloud_qwen`。
 - 数据库会记录 `analysis_channel` 和 `analysis_model`。
-- `/renders`、`/renders/<id>` 和 `/review` 会展示这张图实际由哪个通道分析。
+- 画廊、照片详情和推送工作台会展示照片实际使用的分析通道或模型。
 
 渲染调色板为 PhotoPainter / Spectra 6 六色：黑、白、黄、红、蓝、绿。默认按参考项目使用 `scale` 模式和 Atkinson dithering；也可把 `DITHER_MODE` 改为 `floyd-steinberg`。
 
@@ -112,8 +114,11 @@ python server.py
 打开：
 
 ```text
-http://127.0.0.1:8766/renders
+http://127.0.0.1:8766/
+http://127.0.0.1:8766/gallery
 ```
+
+旧 `/renders`、`/renders/<id>`、`/review` 和 `/render/<id>` 路由暂时保留，供已有书签或脚本兼容；新操作流程应使用数据库 `photo_id` 路由。
 
 渲染产物位于：
 
@@ -173,9 +178,15 @@ NAS 容器内不能用 `127.0.0.1` 访问你电脑上的 LM Studio。本地模�
 ## 测试
 
 ```powershell
+python -m py_compile analyze_photos.py photopainter_renderer.py render_photopainter.py push_manager.py server.py
 python -m unittest discover -v
 python -c "import flask, PIL, pillow_heif, numpy; print('ok')"
+python scripts/validate_webui.py --base-url http://127.0.0.1:8766
 ```
+
+最后一条命令要求服务已启动且已经生成 `push/latest.bmp`，它会检查健康接口、新 WebUI 路由、push manifest，以及 BMP 的 `800x480`、RGB 和 PhotoPainter 六色约束。NAS 验收时把 `--base-url` 改为 NAS 地址即可。
+
+完整的本地与 NAS/Docker 验收步骤见 `docs/webui-acceptance.md`。
 
 ## 说明
 
