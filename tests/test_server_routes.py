@@ -1,4 +1,5 @@
 import importlib
+import io
 import json
 import sqlite3
 import sys
@@ -8,6 +9,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from PIL import Image
+
+from photopainter_renderer import SIX_COLOR_PALETTE
 
 
 class ServerRoutesTests(unittest.TestCase):
@@ -167,6 +170,14 @@ class ServerRoutesTests(unittest.TestCase):
                 bmp = client.get("/push/latest.bmp")
                 self.assertEqual(bmp.status_code, 200)
                 self.assertGreater(len(bmp.data), 100)
+                with Image.open(io.BytesIO(bmp.data)) as pushed_image:
+                    pushed_image.load()
+                    self.assertEqual(pushed_image.size, (800, 480))
+                    self.assertEqual(pushed_image.mode, "RGB")
+                    self.assertLessEqual(
+                        set(pushed_image.getdata()),
+                        set(SIX_COLOR_PALETTE),
+                    )
                 bmp.close()
 
                 png = client.get("/push/latest.png")
@@ -188,6 +199,16 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertEqual(image.status_code, 200)
                 self.assertEqual(image.mimetype, "image/png")
                 image.close()
+
+                review = client.get("/review")
+                self.assertEqual(review.status_code, 200)
+                self.assertIn("照片分析结果", review.get_data(as_text=True))
+                review.close()
+
+                rerender = client.get("/render/0")
+                self.assertEqual(rerender.status_code, 302)
+                self.assertTrue(rerender.headers["Location"].endswith("/renders/0"))
+                rerender.close()
             finally:
                 if original_config is not None:
                     sys.modules["config"] = original_config

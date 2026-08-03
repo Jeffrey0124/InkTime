@@ -25,13 +25,17 @@
 `push_manager.py` 负责：
 
 - 创建 `push_history` 表。
-- 从 `/renders/<id>` 手动发布成品图。
+- 从 `/push-studio/<photo_id>` 调整构图和渲染参数后手动发布成品图。
 - 根据日期、评分和推送历史自动选图。
 - 写入 `output/push/latest.bmp`、`output/push/latest.png` 和 `manifest.json`。
 
 ## API
 
+- `POST /api/photos/<photo_id>/push`
+  - 当前 WebUI 推送工作台使用的主接口。
+  - 如果配置了 `PUSH_API_TOKEN`，请求头必须包含 `X-Push-Token`。
 - `POST /api/push/manual/<render_id>`
+  - 旧 manifest 渲染索引的兼容接口。
   - 如果配置了 `PUSH_API_TOKEN`，请求头必须包含 `X-Push-Token`。
 - `GET /push/latest.bmp`
   - 墨水屏设备固定下载地址。
