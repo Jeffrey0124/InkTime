@@ -558,9 +558,254 @@
     });
   };
 
+  const initSettings = async (root) => {
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[char]);
+    const api = async (url, options = {}) => {
+      const response = await fetch(url, {
+        ...options,
+        headers: withCsrf({ ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) throw new Error(data.error || response.statusText);
+      return data;
+    };
+    const state = { channels: [], presets: [], fallback: [] };
+    const dirtySections = new Set();
+    const editableSections = ["analysis_defaults", "scan_settings", "security_settings"];
+    const channelList = root.querySelector("[data-channel-list]");
+    const fallbackList = root.querySelector("[data-fallback-list]");
+    const warning = root.querySelector("[data-settings-warning]");
+
+    const markDirty = (section) => { dirtySections.add(section); };
+    const clearDirty = (section) => { dirtySections.delete(section); };
+    window.addEventListener("beforeunload", (event) => {
+      if (!dirtySections.size) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+
+    root.querySelectorAll("[data-settings-tab]").forEach((button) => {
+      button.addEventListener("click", () => {
+        root.querySelectorAll("[data-settings-tab]").forEach((item) => item.classList.toggle("active", item === button));
+        root.querySelectorAll("[data-settings-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.settingsPanel === button.dataset.settingsTab));
+      });
+    });
+
+    const modelRow = (model = {}) => `
+      <div class="model-row" data-model-row>
+        <input data-model-id aria-label="模型 ID" value="${escapeHtml(model.model_id || "")}" placeholder="模型 ID">
+        <input data-model-name aria-label="显示名称" value="${escapeHtml(model.name || model.model_id || "")}" placeholder="显示名称">
+        <label class="model-default"><input type="radio" name="default-${escapeHtml(model.channel_id || "new")}" data-model-default ${model.is_default ? "checked" : ""}> 默认</label>
+        <button class="icon-button" type="button" title="移除模型" data-model-remove aria-label="移除模型">×</button>
+      </div>`;
+
+    const channelMarkup = (channel) => `
+        <article class="channel-editor" data-channel-id="${escapeHtml(channel.id)}">
+          <div class="channel-editor-head"><div><strong>${escapeHtml(channel.name)}</strong><span data-channel-version>${channel._draft ? "未保存" : `v${channel.version || 0}`}</span></div><label class="toggle-field"><input type="checkbox" data-channel-enabled ${channel.enabled ? "checked" : ""}> 启用</label></div>
+          <div class="settings-field-grid channel-fields">
+            <label>通道名称<input data-channel-name value="${escapeHtml(channel.name)}"></label>
+            <label>供应商<select data-channel-provider>${state.presets.map((preset) => `<option value="${escapeHtml(preset.id)}" ${preset.id === channel.provider ? "selected" : ""}>${escapeHtml(preset.label)}</option>`).join("")}</select></label>
+            <label class="wide-field">API 地址<input data-channel-url value="${escapeHtml(channel.base_url)}"></label>
+            <label>超时（秒）<input data-channel-timeout type="number" min="1" value="${escapeHtml(channel.timeout)}"></label>
+            <label>凭据来源<select data-credential-source><option value="none" ${channel.credential.source === "none" ? "selected" : ""}>无需凭据</option><option value="environment" ${channel.credential.source === "environment" ? "selected" : ""}>环境变量</option><option value="database" ${channel.credential.source === "database" ? "selected" : ""}>数据库加密</option></select></label>
+            <label>环境变量<input data-credential-env value="${escapeHtml(channel.credential.env_name || "")}" placeholder="QWEN_API_KEY"></label>
+            <label>新密钥<input data-credential-value type="password" autocomplete="new-password" placeholder="${channel.credential.configured ? "已配置，留空保持不变" : "输入密钥"}"></label>
+          </div>
+          <div class="model-editor"><div class="model-editor-head"><strong>模型</strong><div><button class="button" type="button" data-model-add>手动添加</button><button class="button" type="button" data-model-discover>自动发现</button></div></div><div data-model-list>${channel.models.map((model) => modelRow({ ...model, channel_id: channel.id })).join("")}</div></div>
+          <div class="channel-actions"><button class="button" type="button" data-test-connection ${channel._draft ? "disabled" : ""}>基础连接测试</button><button class="button" type="button" data-test-vision ${channel._draft ? "disabled" : ""}>视觉能力测试</button><span class="save-state" data-channel-state></span><button class="text-button danger" type="button" data-channel-delete>${channel._draft ? "放弃" : "删除"}</button><button class="primary-button" type="button" data-channel-save>保存通道</button></div>
+        </article>`;
+
+    const renderChannels = () => {
+      channelList.innerHTML = state.channels.length ? state.channels.map(channelMarkup).join("") : '<div class="settings-empty">尚未配置模型通道</div>';
+      channelList.querySelectorAll("[data-channel-id]").forEach(bindChannel);
+      renderFallback();
+    };
+
+    const collectChannel = (card) => ({
+      id: card.dataset.channelId,
+      name: card.querySelector("[data-channel-name]").value.trim(),
+      provider: card.querySelector("[data-channel-provider]").value,
+      base_url: card.querySelector("[data-channel-url]").value.trim(),
+      timeout: Number(card.querySelector("[data-channel-timeout]").value || 100),
+      enabled: card.querySelector("[data-channel-enabled]").checked,
+      credential: {
+        source: card.querySelector("[data-credential-source]").value,
+        env_name: card.querySelector("[data-credential-env]").value.trim(),
+        value: card.querySelector("[data-credential-value]").value,
+      },
+      models: [...card.querySelectorAll("[data-model-row]")].map((row) => ({
+        model_id: row.querySelector("[data-model-id]").value.trim(),
+        name: row.querySelector("[data-model-name]").value.trim(),
+        is_default: row.querySelector("[data-model-default]").checked,
+        enabled: true,
+      })).filter((model) => model.model_id),
+    });
+
+    function bindChannel(card) {
+      const status = card.querySelector("[data-channel-state]");
+      const dirtyKey = () => `channel:${card.dataset.channelId}`;
+      card.addEventListener("input", () => markDirty(dirtyKey()));
+      card.querySelector("[data-model-list]").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-model-remove]");
+        if (!button) return;
+        button.closest("[data-model-row]").remove(); markDirty(dirtyKey());
+      });
+      card.querySelector("[data-model-add]").addEventListener("click", () => {
+        card.querySelector("[data-model-list]").insertAdjacentHTML("beforeend", modelRow({ channel_id: card.dataset.channelId }));
+        markDirty(dirtyKey());
+      });
+      card.querySelector("[data-channel-provider]").addEventListener("change", (event) => {
+        const preset = state.presets.find((item) => item.id === event.target.value);
+        if (preset) card.querySelector("[data-channel-url]").value = preset.base_url || "";
+        markDirty(dirtyKey());
+      });
+      card.querySelector("[data-channel-save]").addEventListener("click", async () => {
+        status.textContent = "保存中...";
+        try {
+          const oldId = card.dataset.channelId;
+          const channel = state.channels.find((item) => item.id === oldId);
+          const method = channel._draft ? "POST" : "PUT";
+          const url = channel._draft
+            ? "/api/settings/model-channels"
+            : `/api/settings/model-channels/${oldId}`;
+          const data = await api(url, { method, body: JSON.stringify(collectChannel(card)) });
+          state.channels = state.channels.map((item) => item.id === oldId ? data.channel : item);
+          clearDirty(`channel:${oldId}`);
+          card.dataset.channelId = data.channel.id;
+          card.querySelector(".channel-editor-head strong").textContent = data.channel.name;
+          card.querySelector("[data-channel-version]").textContent = `v${data.channel.version}`;
+          card.querySelectorAll("[data-test-connection], [data-test-vision]").forEach((button) => { button.disabled = false; });
+          card.querySelector("[data-channel-delete]").textContent = "删除";
+          status.textContent = "通道已保存";
+          renderFallback();
+        } catch (error) { status.textContent = `保存失败：${error.message}`; }
+      });
+      card.querySelector("[data-model-discover]").addEventListener("click", async () => {
+        status.textContent = "发现模型中...";
+        try {
+          const data = await api(`/api/settings/model-channels/${card.dataset.channelId}/discover`, { method: "POST" });
+          const existing = new Set([...card.querySelectorAll("[data-model-id]")].map((input) => input.value));
+          data.models.filter((model) => !existing.has(model.model_id)).forEach((model) => card.querySelector("[data-model-list]").insertAdjacentHTML("beforeend", modelRow({ ...model, channel_id: card.dataset.channelId })));
+          status.textContent = `发现 ${data.models.length} 个模型，保存后生效`; markDirty(dirtyKey());
+        } catch (error) { status.textContent = `发现失败：${error.message}`; }
+      });
+      card.querySelector("[data-test-connection]").addEventListener("click", async () => {
+        status.textContent = "测试连接中...";
+        try { await api(`/api/settings/model-channels/${card.dataset.channelId}/test-connection`, { method: "POST" }); status.textContent = "基础连接正常"; } catch (error) { status.textContent = `连接失败：${error.message}`; }
+      });
+      card.querySelector("[data-test-vision]").addEventListener("click", async () => {
+        const model = card.querySelector("[data-model-default]:checked")?.closest("[data-model-row]")?.querySelector("[data-model-id]")?.value || card.querySelector("[data-model-id]")?.value;
+        if (!model) { status.textContent = "请先添加模型"; return; }
+        status.textContent = "测试视觉能力中...";
+        try { await api(`/api/settings/model-channels/${card.dataset.channelId}/test-vision`, { method: "POST", body: JSON.stringify({ model_id: model }) }); status.textContent = "视觉能力正常"; } catch (error) { status.textContent = `视觉测试失败：${error.message}`; }
+      });
+      card.querySelector("[data-channel-delete]").addEventListener("click", async () => {
+        const channel = state.channels.find((item) => item.id === card.dataset.channelId);
+        if (channel?._draft) {
+          state.channels = state.channels.filter((item) => item.id !== channel.id);
+          clearDirty(`channel:${channel.id}`);
+          card.remove();
+          if (!state.channels.length) channelList.innerHTML = '<div class="settings-empty">尚未配置模型通道</div>';
+          renderFallback();
+          return;
+        }
+        if (!window.confirm("删除未被引用的通道；有历史引用时将改为停用。继续吗？")) return;
+        try {
+          await api(`/api/settings/model-channels/${card.dataset.channelId}`, { method: "DELETE" });
+          state.channels = state.channels.filter((item) => item.id !== card.dataset.channelId);
+          clearDirty(dirtyKey());
+          card.remove();
+          renderFallback();
+        } catch (error) { status.textContent = `操作失败：${error.message}`; }
+      });
+    }
+
+    const fallbackOptions = () => state.channels.flatMap((channel) => channel.models.filter((model) => model.enabled).map((model) => ({ value: `${channel.id}\u0000${model.model_id}`, label: `${channel.name} / ${model.name}` })));
+    const renderFallback = () => {
+      if (!fallbackList) return;
+      const options = fallbackOptions();
+      fallbackList.innerHTML = state.fallback.map((item, index) => `<div class="fallback-row" data-fallback-row><span>${index + 1}</span><select>${options.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === `${item.channel_id}\u0000${item.model_id}` ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select><button class="icon-button" type="button" data-move-up title="上移">↑</button><button class="icon-button" type="button" data-move-down title="下移">↓</button><button class="icon-button" type="button" data-fallback-remove title="移除">×</button></div>`).join("");
+      fallbackList.querySelectorAll("[data-fallback-row]").forEach((row, index) => {
+        row.querySelector("select").addEventListener("change", () => markDirty("fallback_chain"));
+        row.querySelector("[data-fallback-remove]").addEventListener("click", () => { state.fallback.splice(index, 1); renderFallback(); markDirty("fallback_chain"); });
+        row.querySelector("[data-move-up]").addEventListener("click", () => { if (index) [state.fallback[index - 1], state.fallback[index]] = [state.fallback[index], state.fallback[index - 1]]; renderFallback(); markDirty("fallback_chain"); });
+        row.querySelector("[data-move-down]").addEventListener("click", () => { if (index < state.fallback.length - 1) [state.fallback[index + 1], state.fallback[index]] = [state.fallback[index], state.fallback[index + 1]]; renderFallback(); markDirty("fallback_chain"); });
+      });
+    };
+
+    const loadChannels = async () => {
+      const [data, chain] = await Promise.all([api("/api/settings/model-channels"), api("/api/settings/fallback-chain")]);
+      state.channels = data.channels; state.presets = data.presets; state.fallback = chain.items;
+      if (data.capabilities.warning) { warning.hidden = false; warning.textContent = data.capabilities.warning; }
+      else warning.hidden = true;
+      renderChannels();
+    };
+
+    root.querySelector("[data-channel-add]").addEventListener("click", () => {
+      const preset = state.presets[0] || { id: "custom", label: "新通道", base_url: "" };
+      const draft = {
+        id: `draft-${window.crypto.randomUUID()}`,
+        _draft: true,
+        name: `${preset.label} ${state.channels.length + 1}`,
+        provider: preset.id,
+        base_url: preset.base_url,
+        timeout: 100,
+        enabled: true,
+        credential: { source: preset.credential_source || "none", configured: false, env_name: preset.credential_env || "" },
+        models: [],
+        version: 0,
+      };
+      channelList.querySelector(".settings-empty")?.remove();
+      state.channels.push(draft);
+      channelList.insertAdjacentHTML("beforeend", channelMarkup(draft));
+      bindChannel(channelList.lastElementChild);
+      markDirty(`channel:${draft.id}`);
+    });
+    root.querySelector("[data-fallback-add]").addEventListener("click", () => {
+      const option = fallbackOptions().find((item) => !state.fallback.some((entry) => item.value === `${entry.channel_id}\u0000${entry.model_id}`));
+      if (!option) return;
+      const [channel_id, model_id] = option.value.split("\u0000");
+      state.fallback.push({ channel_id, model_id }); renderFallback(); markDirty("fallback_chain");
+    });
+    root.querySelector("[data-fallback-save]").addEventListener("click", async () => {
+      const output = [...fallbackList.querySelectorAll("select")].map((select) => {
+        const [channel_id, model_id] = select.value.split("\u0000"); return { channel_id, model_id };
+      });
+      const status = root.querySelector("[data-fallback-state]");
+      try { const data = await api("/api/settings/fallback-chain", { method: "PUT", body: JSON.stringify({ items: output }) }); state.fallback = data.items; clearDirty("fallback_chain"); status.textContent = "顺序已保存"; renderFallback(); } catch (error) { status.textContent = `保存失败：${error.message}`; }
+    });
+
+    root.querySelectorAll("[data-settings-form]").forEach(async (form) => {
+      const section = form.dataset.settingsForm;
+      if (!editableSections.includes(section)) return;
+      const endpoint = section.replaceAll("_", "-");
+      const data = await api(`/api/settings/${endpoint}`);
+      Object.entries(data.value || {}).forEach(([name, value]) => {
+        const input = form.elements.namedItem(name); if (!input) return;
+        if (input.type === "checkbox") input.checked = Boolean(value); else input.value = value;
+      });
+      form.addEventListener("input", () => markDirty(section));
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const value = {};
+        [...form.elements].forEach((input) => { if (!input.name) return; value[input.name] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; });
+        const status = form.querySelector("[data-form-state]");
+        try { const saved = await api(`/api/settings/${endpoint}`, { method: "PUT", body: JSON.stringify(value) }); clearDirty(section); status.textContent = `已保存 v${saved.version}`; } catch (error) { status.textContent = `保存失败：${error.message}`; }
+      });
+    });
+
+    await loadChannels();
+  };
+
   document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll("[data-push-studio]").forEach(initPushStudio);
     document.querySelectorAll("[data-detail-caption-editor]").forEach(initDetailCaptionEditor);
     document.querySelectorAll("[data-log-toggle]").forEach(initDashboardLog);
+    document.querySelectorAll("[data-settings-app]").forEach((root) => initSettings(root).catch(() => {
+      const warning = root.querySelector("[data-settings-warning]");
+      if (warning) { warning.hidden = false; warning.textContent = "配置加载失败，请刷新重试。"; }
+    }));
   });
 })();

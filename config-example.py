@@ -51,6 +51,8 @@ AUTH_COOKIE_SECURE = os.environ.get("INKTIME_AUTH_COOKIE_SECURE", "false").lower
     "true",
     "yes",
 }
+# 设置页数据库凭据的加密主密钥。留空时禁止向数据库保存 API Key。
+SETTINGS_MASTER_KEY = os.environ.get("INKTIME_SETTINGS_MASTER_KEY", "")
 DISPLAY_PREVIEW_DIR = "./output/previews"
 
 # 离线中文城市名索引，用于根据照片 GPS 信息补充城市名。
