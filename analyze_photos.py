@@ -154,13 +154,31 @@ if not _raw_channels:
         {"api_url": _compat_url, "model_name": _compat_model, "api_key": _compat_key}
     ]
 
-API_CHANNELS: list[dict] = list(_raw_channels)
+from analysis_settings import load_analysis_runtime_settings
+
+_runtime_settings = load_analysis_runtime_settings(
+    DB_PATH,
+    config_channels=list(_raw_channels),
+    config_defaults={
+        "batch_size": getattr(cfg, "BATCH_LIMIT", None),
+        "max_long_edge": int(getattr(cfg, "VLM_MAX_LONG_EDGE", 2560) or 2560),
+        "prompt_profile": str(
+            getattr(cfg, "ANALYSIS_PROMPT_PROFILE", "balanced") or "balanced"
+        ),
+    },
+    master_key=str(
+        getattr(cfg, "SETTINGS_MASTER_KEY", None)
+        or os.environ.get("INKTIME_SETTINGS_MASTER_KEY", "")
+    ),
+)
+
+API_CHANNELS: list[dict] = list(_runtime_settings["channels"])
 _channel_cooldown_until: list[float] = [0.0] * len(API_CHANNELS)
 _channel_inflight: list[int] = [0] * len(API_CHANNELS)
 _channel_lock = threading.Lock()
 
 # 每次处理多少张；None 为不限制
-BATCH_LIMIT = getattr(cfg, "BATCH_LIMIT", None)
+BATCH_LIMIT = _runtime_settings["defaults"].get("batch_size")
 
 # 请求超时时间（秒）
 TIMEOUT = float(getattr(cfg, "TIMEOUT", 600) or 600)
@@ -176,7 +194,10 @@ else:
 # 发送给 VLM 之前，先把图片长边缩放到该值（像素）。
 # 0 表示不缩放。
 # 本地推理可保持较高值；云端推理建议降低（减少 token/成本）。
-VLM_MAX_LONG_EDGE = int(getattr(cfg, "VLM_MAX_LONG_EDGE", 2560) or 2560)
+VLM_MAX_LONG_EDGE = int(_runtime_settings["defaults"].get("max_long_edge") or 2560)
+ANALYSIS_PROMPT_PROFILE = str(
+    _runtime_settings["defaults"].get("prompt_profile") or "balanced"
+)
 
 # 中文城市数据库位置
 WORLD_CITIES_CSV = Path(str(getattr(cfg, "WORLD_CITIES_CSV", "data/world_cities_zh.csv") or "data/world_cities_zh.csv")).expanduser()
@@ -1226,6 +1247,16 @@ def _normalize_location_hint(value) -> str:
     return text[:12]
 
 
+def analysis_prompt_profile_instruction(profile: str | None = None) -> str:
+    """Return the scoring emphasis captured when this analysis process started."""
+    selected = str(profile or ANALYSIS_PROMPT_PROFILE or "balanced").strip().lower()
+    if selected == "memory":
+        return "本次采用回忆优先方案：在不虚构事实的前提下，更重视人物关系、事件性、情绪和不可复现性。\n"
+    if selected == "beauty":
+        return "本次采用美观优先方案：更严格评价构图、光线、清晰度、色彩和主体表现，不因题材本身加分。\n"
+    return "本次采用均衡方案：回忆价值与视觉美感分别独立、等权审视。\n"
+
+
 def call_vlm(image_path: Path) -> dict:
     try:
         img_b64 = encode_image_to_b64(image_path)
@@ -1238,7 +1269,8 @@ def call_vlm(image_path: Path) -> dict:
     image_height = exif_info.get("height") or "未知"
 
     system_prompt = (
-        "你是一个“个人相册照片评估助手”，擅长理解真实照片的内容，并从回忆价值和美观角度打分。\n"
+        analysis_prompt_profile_instruction()
+        + "你是一个“个人相册照片评估助手”，擅长理解真实照片的内容，并从回忆价值和美观角度打分。\n"
         "你会收到一张照片（以 base64 形式提供），你的任务是：\n"
         "1）用中文详细描述照片内容（80~200 字），\n"
         "2）判断照片的大致类型：人物/孩子/猫咪/家庭/旅行/风景/美食/宠物/日常/文档/杂物/其他，一张照片可以有不止一个类型。\n"

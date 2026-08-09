@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import sqlite3
 import datetime as dt
@@ -20,6 +21,7 @@ from flask import Flask, abort, g, jsonify, redirect, request, send_file, sessio
 from PIL import Image, ImageOps
 
 from photo_identity import ensure_photo_identity_schema
+from model_provider import ModelProviderClient
 from push_manager import (
     PushSettings,
     ensure_push_schema,
@@ -32,6 +34,7 @@ from push_manager import (
 from render_photopainter import render_from_database
 from web_queries import load_photo, load_photos, load_status
 from web_auth import WebAuth
+from settings_store import MasterKeyUnavailable, SettingsError, SettingsStore
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -980,36 +983,60 @@ def _render_settings_page() -> str:
     <section class="screen settings-screen" aria-labelledby="settings-title">
       <div class="section-heading">
         <div>
-          <p class="kicker">Settings Preview</p>
-          <h2 id="settings-title">配置页视觉草案</h2>
+          <p class="kicker">Settings</p>
+          <h2 id="settings-title">系统配置</h2>
         </div>
+        <span class="settings-scope-note">修改仅影响新进程/新任务</span>
       </div>
-      <div class="settings-layout">
-        <article class="setting-row">
-          <div>
-            <h3>local_lmstudio</h3>
-            <p>本地模型通道；真实模型名和 URL 来自本地配置。</p>
-          </div>
-          <span class="state-label good">可用性待测</span>
-        </article>
-        <article class="setting-row">
-          <div>
-            <h3>cloud_qwen</h3>
-            <p>云端兜底通道；前端不展示真实 API key。</p>
-          </div>
-          <span class="state-label">兜底</span>
-        </article>
-        <article class="setting-row">
-          <div>
-            <h3>画廊批量偏好</h3>
-            <p>批量选择只在选择模式中展开，画廊主视图保持浏览优先。</p>
-          </div>
-          <label class="setting-control">默认选择前 <input class="mini-input" type="number" value="20"> 张</label>
-        </article>
-        <article class="setting-note">
-          <strong>密钥不在前端显示</strong>
-          <p>配置页只展示通道、模型、URL、timeout 和连通性状态；真实 API key 继续来自 config.py 或 NAS .env。</p>
-        </article>
+      <div class="settings-app" data-settings-app>
+        <div class="settings-tabs" role="tablist" aria-label="配置区域">
+          <button class="active" type="button" role="tab" data-settings-tab="channels">模型通道</button>
+          <button type="button" role="tab" data-settings-tab="analysis">分析默认值</button>
+          <button type="button" role="tab" data-settings-tab="scan">素材扫描</button>
+          <button type="button" role="tab" data-settings-tab="security">安全</button>
+        </div>
+        <section class="settings-panel active" role="tabpanel" data-settings-panel="channels">
+          <div class="settings-panel-head"><div><h3>模型通道</h3><p>按降级顺序组合通道与模型。</p></div><button class="primary-button" type="button" data-channel-add>添加通道</button></div>
+          <p class="settings-warning" data-settings-warning hidden></p>
+          <div class="channel-list" data-channel-list></div>
+          <article class="settings-subpanel">
+            <div class="settings-panel-head"><div><h3>降级链</h3><p>上方优先，失败后依次尝试。</p></div><div class="settings-head-actions"><button class="button" type="button" data-fallback-add>添加组合</button><button class="primary-button" type="button" data-fallback-save>保存顺序</button></div></div>
+            <div class="fallback-list" data-fallback-list></div>
+            <p class="save-state" data-fallback-state aria-live="polite"></p>
+          </article>
+        </section>
+        <section class="settings-panel" role="tabpanel" data-settings-panel="analysis">
+          <form class="settings-form" data-settings-form="analysis_defaults">
+            <h3>分析默认值</h3>
+            <div class="settings-field-grid">
+              <label>单次任务数量<input name="batch_size" type="number" min="1" value="10"></label>
+              <label>图像最长边<input name="max_long_edge" type="number" min="256" value="2560"></label>
+              <label>提示词方案<select name="prompt_profile"><option value="balanced">均衡</option><option value="memory">回忆优先</option><option value="beauty">美观优先</option></select></label>
+            </div>
+            <div class="settings-save-row"><button class="primary-button" type="submit">保存分析默认值</button><span class="save-state" data-form-state></span></div>
+          </form>
+        </section>
+        <section class="settings-panel" role="tabpanel" data-settings-panel="scan">
+          <form class="settings-form" data-settings-form="scan_settings">
+            <h3>素材扫描</h3>
+            <div class="settings-field-grid">
+              <label>监控目录<input name="image_dir" type="text" autocomplete="off"></label>
+              <label>扫描间隔（分钟）<input name="interval_minutes" type="number" min="1" value="30"></label>
+              <label class="toggle-field"><input name="include_subdirectories" type="checkbox" checked> 包含子目录</label>
+            </div>
+            <div class="settings-save-row"><button class="primary-button" type="submit">保存扫描设置</button><span class="save-state" data-form-state></span></div>
+          </form>
+        </section>
+        <section class="settings-panel" role="tabpanel" data-settings-panel="security">
+          <form class="settings-form" data-settings-form="security_settings">
+            <h3>安全</h3>
+            <div class="settings-field-grid">
+              <label class="toggle-field"><input name="audit_events" type="checkbox" checked> 记录配置变更事件</label>
+              <label class="toggle-field"><input name="mask_paths" type="checkbox" checked> 页面隐藏完整路径</label>
+            </div>
+            <div class="settings-save-row"><button class="primary-button" type="submit">保存安全设置</button><span class="save-state" data-form-state></span></div>
+          </form>
+        </section>
       </div>
     </section>
     """
@@ -1049,6 +1076,34 @@ def _render_change_password_page(*, csrf_token: str) -> str:
     """
 
 
+def _dispatch_channel_diagnostic(
+    settings_store: SettingsStore,
+    provider_client,
+    channel_id: str,
+    kind: str,
+    payload: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], int]:
+    if kind not in {"discover", "connection", "vision"}:
+        return {"ok": False, "error": "unknown_diagnostic"}, 400
+    channel = settings_store.get_channel(channel_id)
+    if channel is None:
+        return {"ok": False, "error": "not_found"}, 404
+    try:
+        api_key = settings_store.resolve_credential(channel_id)
+    except Exception:
+        return {"ok": False, "error": "credential_unavailable"}, 409
+    if kind == "discover":
+        result = provider_client.discover_models(channel, api_key)
+    elif kind == "connection":
+        result = provider_client.test_connection(channel, api_key)
+    else:
+        model_id = str((payload or {}).get("model_id") or "")
+        if not model_id:
+            return {"ok": False, "error": "model_required"}, 400
+        result = provider_client.test_vision(channel, model_id, api_key)
+    return result, (200 if result.get("ok") else 502)
+
+
 def create_app(
     *,
     db_path: str | Path | None = None,
@@ -1058,6 +1113,8 @@ def create_app(
     session_secret: str | None = None,
     auth_cookie_secure: bool | None = None,
     auth_now=None,
+    settings_master_key: str | None = None,
+    model_provider=None,
 ) -> Flask:
     app = Flask(__name__)
     auth_enabled = True if auth_required is None else bool(auth_required)
@@ -1071,6 +1128,21 @@ def create_app(
     )
     ensure_photo_identity_schema(db)
     ensure_push_schema(db)
+    settings_store = SettingsStore(
+        db,
+        master_key=(
+            str(
+                _config_value(
+                    "SETTINGS_MASTER_KEY",
+                    os.environ.get("INKTIME_SETTINGS_MASTER_KEY", ""),
+                )
+                or ""
+            )
+            if settings_master_key is None
+            else settings_master_key
+        ),
+    )
+    provider_client = model_provider or ModelProviderClient()
     auth = WebAuth(
         db,
         initial_password=(
@@ -1094,6 +1166,7 @@ def create_app(
         ),
     )
     app.extensions["web_auth"] = auth
+    app.extensions["settings_store"] = settings_store
 
     def push_token_error():
         token = str(_config_value("PUSH_API_TOKEN", "") or "")
@@ -1507,9 +1580,111 @@ def create_app(
             return redirect(f"/push-studio/{photos[0]['photo_id']}")
         return redirect("/gallery")
 
+    def settings_error(exc: Exception):
+        if isinstance(exc, MasterKeyUnavailable):
+            return jsonify({"ok": False, "error": "master_key_unavailable"}), 409
+        if isinstance(exc, (SettingsError, KeyError)):
+            return jsonify({"ok": False, "error": "invalid_settings"}), 400
+        raise exc
+
+    @app.get("/api/settings/model-channels")
+    def api_settings_channels():
+        return jsonify(
+            {
+                "ok": True,
+                "channels": settings_store.list_channels(),
+                "presets": settings_store.provider_presets(),
+                "capabilities": settings_store.capabilities(),
+            }
+        )
+
+    @app.post("/api/settings/model-channels")
+    def api_settings_channel_create():
+        try:
+            channel = settings_store.save_channel(request.get_json(silent=True) or {})
+        except Exception as exc:
+            return settings_error(exc)
+        return jsonify({"ok": True, "channel": channel}), 201
+
+    @app.put("/api/settings/model-channels/<channel_id>")
+    def api_settings_channel_update(channel_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            channel = settings_store.save_channel({**payload, "id": channel_id})
+        except Exception as exc:
+            return settings_error(exc)
+        return jsonify({"ok": True, "channel": channel})
+
+    @app.delete("/api/settings/model-channels/<channel_id>")
+    def api_settings_channel_delete(channel_id: str):
+        try:
+            result = settings_store.delete_channel(channel_id)
+        except Exception as exc:
+            return settings_error(exc)
+        return jsonify({"ok": True, **result})
+
+    def run_channel_diagnostic(channel_id: str, test: str):
+        result, status = _dispatch_channel_diagnostic(
+            settings_store,
+            provider_client,
+            channel_id,
+            test,
+            request.get_json(silent=True) or {},
+        )
+        return jsonify(result), status
+
+    @app.post("/api/settings/model-channels/<channel_id>/discover")
+    def api_settings_channel_discover(channel_id: str):
+        return run_channel_diagnostic(channel_id, "discover")
+
+    @app.post("/api/settings/model-channels/<channel_id>/test-connection")
+    def api_settings_channel_test_connection(channel_id: str):
+        return run_channel_diagnostic(channel_id, "connection")
+
+    @app.post("/api/settings/model-channels/<channel_id>/test-vision")
+    def api_settings_channel_test_vision(channel_id: str):
+        return run_channel_diagnostic(channel_id, "vision")
+
+    @app.get("/api/settings/fallback-chain")
+    def api_settings_fallback_chain():
+        return jsonify({"ok": True, "items": settings_store.get_fallback_chain()})
+
+    @app.put("/api/settings/fallback-chain")
+    def api_settings_fallback_chain_save():
+        try:
+            result = settings_store.save_fallback_chain(
+                (request.get_json(silent=True) or {}).get("items") or []
+            )
+        except Exception as exc:
+            return settings_error(exc)
+        return jsonify({"ok": True, **result})
+
+    @app.get("/api/settings/<section>")
+    def api_settings_section(section: str):
+        if section not in {"analysis-defaults", "scan-settings", "security-settings"}:
+            abort(404)
+        key = section.replace("-", "_")
+        result = settings_store.get_section(key)
+        return jsonify({"ok": True, **result})
+
+    @app.put("/api/settings/<section>")
+    def api_settings_section_save(section: str):
+        if section not in {"analysis-defaults", "scan-settings", "security-settings"}:
+            abort(404)
+        key = section.replace("-", "_")
+        try:
+            result = settings_store.save_section(key, request.get_json(silent=True) or {})
+        except Exception as exc:
+            return settings_error(exc)
+        return jsonify({"ok": True, **result})
+
+    @app.get("/api/settings/versions/<section>")
+    def api_settings_versions(section: str):
+        return jsonify({"ok": True, "versions": settings_store.list_versions(section)})
+
     @app.get("/settings")
     def settings():
-        return _page("配置页视觉草案", _render_settings_page(), active="settings")
+        return _page("系统配置", _render_settings_page(), active="settings")
 
     @app.get("/renders")
     def renders():

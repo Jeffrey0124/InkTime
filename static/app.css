@@ -1295,6 +1295,156 @@ body:has(.photo-lightbox:target) {
   overflow: hidden;
 }
 
+.settings-screen {
+  display: grid;
+  gap: 22px;
+}
+
+.settings-scope-note {
+  color: var(--green-dark);
+  font-weight: 700;
+}
+
+.settings-app {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  min-height: 560px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.settings-tabs {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  padding: 18px 12px;
+  border-right: 1px solid var(--line);
+  background: #f1f4ef;
+}
+
+.settings-tabs button {
+  min-height: 42px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  text-align: left;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.settings-tabs button.active {
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 4px 14px rgba(39, 48, 42, 0.08);
+}
+
+.settings-panel {
+  display: none;
+  padding: 26px;
+}
+
+.settings-panel.active {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+}
+
+.settings-panel-head,
+.settings-head-actions,
+.settings-save-row,
+.channel-actions,
+.model-row,
+.fallback-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-panel-head {
+  justify-content: space-between;
+}
+
+.settings-panel-head h3,
+.settings-panel-head p,
+.settings-subpanel h3 {
+  margin: 0;
+}
+
+.settings-panel-head p,
+.settings-help,
+.save-state,
+.channel-status {
+  color: var(--muted);
+}
+
+.settings-warning {
+  margin: 0;
+  padding: 12px 14px;
+  border-left: 3px solid var(--red);
+  background: #fff3ef;
+  color: #8f3427;
+}
+
+.settings-subpanel,
+.channel-card,
+.settings-form {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.channel-list,
+.model-list,
+.fallback-list {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-field-grid,
+.channel-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.settings-field-grid label,
+.channel-card label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.settings-field-grid input,
+.settings-field-grid select,
+.channel-card input,
+.channel-card select,
+.fallback-row select {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--ink);
+}
+
+.settings-empty {
+  padding: 28px;
+  border: 1px dashed var(--line-strong);
+  color: var(--muted);
+  text-align: center;
+}
+
 .setting-row,
 .setting-note {
   display: flex;
@@ -1382,6 +1532,25 @@ td {
 @media (max-width: 760px) {
   .app-shell {
     display: block;
+  }
+
+  .settings-app {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-panel {
+    padding: 18px 14px;
+  }
+
+  .settings-field-grid,
+  .channel-fields {
+    grid-template-columns: 1fr;
   }
 
   .rail {
