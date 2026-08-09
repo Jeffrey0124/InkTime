@@ -188,7 +188,7 @@ class AnalysisWorkerTests(unittest.TestCase):
         failed = worker.run_once()
         completed = worker.run_once()
 
-        self.assertEqual(failed["status"], "completed_with_failures")
+        self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["failed_count"], 1)
         self.assertEqual(completed["task_id"], following["task_id"])
         self.assertEqual(completed["status"], "completed")

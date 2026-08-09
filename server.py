@@ -781,6 +781,52 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
 def _render_analysis_task_page(task: dict[str, Any]) -> str:
     mode = "重新分析" if task["task_type"] == "reanalysis" else "增量分析"
     progress_heading = "任务已进入队列" if task["status"] == "queued" else "任务执行进度"
+    task_id = int(task["task_id"])
+    csrf_token = _esc(session.get("csrf_token") or "")
+    can_manage = bool(getattr(g, "is_admin", True))
+    action_labels = {
+        "cancel": "取消任务",
+        "pause": "暂停任务",
+        "resume": "恢复任务",
+        "stop": "停止任务",
+    }
+    allowed_actions = {
+        "queued": ("cancel",),
+        "running": ("pause", "stop"),
+        "pausing": ("stop",),
+        "paused": ("resume", "stop"),
+    }
+    control_buttons = "".join(
+        f"""
+        <form method="post" action="/api/analysis-tasks/{task_id}/control">
+          <input type="hidden" name="csrf_token" value="{csrf_token}">
+          <input type="hidden" name="action" value="{action}">
+          <button class="button" type="submit">{action_labels[action]}</button>
+        </form>
+        """
+        for action in allowed_actions.get(task["status"], ())
+    )
+    if task["status"] in {"stopped", "completed_with_failures", "failed"}:
+        control_buttons += f"""
+        <form method="post" action="/api/analysis-tasks/{task_id}/retry">
+          <input type="hidden" name="csrf_token" value="{csrf_token}">
+          <button class="primary-button" type="submit">重试失败与未处理项</button>
+        </form>
+        """
+    reorder_form = ""
+    if task["status"] == "queued":
+        reorder_form = f"""
+        <form class="task-reorder-form" method="post" action="/api/analysis-tasks/{task_id}/reorder">
+          <input type="hidden" name="csrf_token" value="{csrf_token}">
+          <label>队列位置<input name="queue_position" type="number" min="1" value="{_esc(str(task['queue_position']))}"></label>
+          <button class="button" type="submit">更新顺序</button>
+        </form>
+        """
+    controls = (
+        f'<div class="task-control-row" data-task-controls>{control_buttons}{reorder_form}</div>'
+        if can_manage
+        else ""
+    )
     levels = "".join(
         f"<li><span>{index + 1}</span><strong>{_esc(item['channel_name'])}</strong><small>{_esc(item['model_id'])} · v{_esc(item['channel_version'])}</small></li>"
         for index, item in enumerate(task["strategy"].get("execution_levels") or [])
@@ -792,6 +838,7 @@ def _render_analysis_task_page(task: dict[str, Any]) -> str:
         <div><span class="state-label">{_esc(task['status'])}</span><h3>{_esc(progress_heading)}</h3><p>{_esc(mode)} · {_esc(str(task['total_count']))} 张 · 并发 {_esc(str(task['concurrency']))} · 当前 {_esc(task.get('current_filename') or '等待领取')}</p></div>
         <dl><div><dt>已处理</dt><dd>{_esc(str(task['processed_count']))}</dd></div><div><dt>成功</dt><dd>{_esc(str(task['succeeded_count']))}</dd></div><div><dt>失败</dt><dd>{_esc(str(task['failed_count']))}</dd></div><div><dt>剩余</dt><dd>{_esc(str(task['remaining_count']))}</dd></div></dl>
       </section>
+      {controls}
       <section class="task-strategy-panel"><p class="kicker">Frozen Strategy</p><h3>模型执行策略</h3><ol>{levels}</ol><p>该任务已冻结素材集合和非敏感模型配置；凭据将在 Worker 执行时读取。</p></section>
     </section>
     """
@@ -1633,6 +1680,38 @@ def create_app(
             task = analysis_task_service.create_task(request.get_json(silent=True) or {})
         except AnalysisTaskError as exc:
             return jsonify({"ok": False, "error": str(exc), "code": exc.code}), exc.status
+        return jsonify({"ok": True, "task": task}), 201
+
+    @app.post("/api/analysis-tasks/<int:task_id>/control")
+    def api_analysis_task_control(task_id: int):
+        payload = request.get_json(silent=True) or request.form
+        try:
+            task = analysis_task_service.control_task(task_id, str(payload.get("action") or ""))
+        except AnalysisTaskError as exc:
+            return jsonify({"ok": False, "error": str(exc), "code": exc.code}), exc.status
+        if request.accept_mimetypes.accept_html and not request.is_json:
+            return redirect(f"/analysis-tasks/{task_id}")
+        return jsonify({"ok": True, "task": task})
+
+    @app.post("/api/analysis-tasks/<int:task_id>/reorder")
+    def api_analysis_task_reorder(task_id: int):
+        payload = request.get_json(silent=True) or request.form
+        try:
+            task = analysis_task_service.reorder_task(task_id, payload.get("queue_position"))
+        except AnalysisTaskError as exc:
+            return jsonify({"ok": False, "error": str(exc), "code": exc.code}), exc.status
+        if request.accept_mimetypes.accept_html and not request.is_json:
+            return redirect(f"/analysis-tasks/{task_id}")
+        return jsonify({"ok": True, "task": task})
+
+    @app.post("/api/analysis-tasks/<int:task_id>/retry")
+    def api_analysis_task_retry(task_id: int):
+        try:
+            task = analysis_task_service.retry_task(task_id)
+        except AnalysisTaskError as exc:
+            return jsonify({"ok": False, "error": str(exc), "code": exc.code}), exc.status
+        if request.accept_mimetypes.accept_html and not request.is_json:
+            return redirect(f"/analysis-tasks/{task['task_id']}")
         return jsonify({"ok": True, "task": task}), 201
 
     @app.get("/analysis-tasks/<int:task_id>")

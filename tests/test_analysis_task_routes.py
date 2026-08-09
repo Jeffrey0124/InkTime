@@ -7,6 +7,60 @@ from server import create_app
 
 
 class AnalysisTaskRouteTests(unittest.TestCase):
+    def test_task_control_route_returns_updated_state(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_app(
+                db_path=root / "photos.db",
+                render_output_dir=root / "renders",
+                auth_required=False,
+                scan_root=root,
+                scan_startup=False,
+            )
+            store = app.extensions["settings_store"]
+            channel = store.save_channel(
+                {
+                    "name": "Primary",
+                    "provider": "custom",
+                    "base_url": "https://example.com/v1",
+                    "credential": {"source": "none"},
+                    "models": [{"model_id": "vision-a", "is_default": True}],
+                }
+            )
+            store.save_fallback_chain(
+                [{"channel_id": channel["id"], "model_id": "vision-a"}]
+            )
+            conn = sqlite3.connect(root / "photos.db")
+            conn.execute(
+                """
+                INSERT INTO photos
+                (path, filename, exists_on_disk, status, file_status,
+                 analysis_status, visibility_status, created_at, updated_at)
+                VALUES (?, 'task.jpg', 1, 'pending', 'present', 'pending', 'active', ?, ?)
+                """,
+                (str(root / "task.jpg"), "2026-01-01", "2026-01-01"),
+            )
+            conn.commit()
+            photo_id = conn.execute("SELECT id FROM photos").fetchone()[0]
+            conn.close()
+            service = app.extensions["analysis_task_service"]
+            task = service.create_task(
+                {"task_type": "incremental", "photo_ids": [photo_id]}
+            )
+            client = app.test_client()
+
+            cancelled = client.post(
+                f"/api/analysis-tasks/{task['task_id']}/control", json={"action": "cancel"}
+            )
+
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(cancelled.get_json()["task"]["status"], "cancelled")
+            invalid = client.post(
+                f"/api/analysis-tasks/{task['task_id']}/control", json={"action": "pause"}
+            )
+            self.assertEqual(invalid.status_code, 409)
+            app.extensions["scan_coordinator"].shutdown()
+
     def test_library_selection_preview_and_task_creation_api(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -76,6 +130,7 @@ class AnalysisTaskRouteTests(unittest.TestCase):
             detail = client.get(f"/analysis-tasks/{task['task_id']}")
             self.assertEqual(detail.status_code, 200)
             self.assertIn("任务已进入队列", detail.get_data(as_text=True))
+            self.assertIn("data-task-controls", detail.get_data(as_text=True))
 
             html = client.get("/library").get_data(as_text=True)
             self.assertIn("data-library-selection", html)
@@ -100,6 +155,15 @@ class AnalysisTaskRouteTests(unittest.TestCase):
             client = app.test_client()
             self.assertEqual(client.post("/api/library/selection-preview", json={}).status_code, 401)
             self.assertEqual(client.post("/api/analysis-tasks", json={}).status_code, 401)
+            self.assertEqual(
+                client.post("/api/analysis-tasks/1/control", json={"action": "cancel"}).status_code,
+                401,
+            )
+            self.assertEqual(
+                client.post("/api/analysis-tasks/1/reorder", json={"queue_position": 1}).status_code,
+                401,
+            )
+            self.assertEqual(client.post("/api/analysis-tasks/1/retry").status_code, 401)
             app.extensions["scan_coordinator"].shutdown()
 
 
