@@ -86,6 +86,34 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual([item["version"] for item in versions], [2, 1])
         self.assertEqual(versions[1]["snapshot"]["batch_size"], 10)
 
+    def test_runtime_channel_resolves_the_frozen_version(self):
+        store = SettingsStore(self.db_path, master_key="test-master-key")
+        first = store.save_channel(
+            {
+                "name": "Frozen Channel",
+                "provider": "custom",
+                "base_url": "https://old.example/v1",
+                "timeout": 30,
+                "credential": {"source": "none"},
+                "models": [{"model_id": "vision-old", "is_default": True}],
+            }
+        )
+        store.save_channel(
+            {
+                **first,
+                "base_url": "https://new.example/v1",
+                "timeout": 60,
+                "credential": {"source": "none"},
+                "models": [{"model_id": "vision-new", "is_default": True}],
+            }
+        )
+
+        runtime = store.resolve_runtime_channel(first["id"], 1, "vision-old")
+
+        self.assertEqual(runtime["api_url"], "https://old.example/v1/chat/completions")
+        self.assertEqual(runtime["model_name"], "vision-old")
+        self.assertEqual(runtime["timeout"], 30.0)
+
     def test_historically_referenced_channel_can_only_be_disabled(self):
         store = SettingsStore(self.db_path, master_key="test-master-key")
         channel = store.save_channel(

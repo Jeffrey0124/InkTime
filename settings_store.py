@@ -233,6 +233,34 @@ class SettingsStore:
                 return self._decrypt(str(row["id"]), row["credential_ciphertext"])
             return ""
 
+    def resolve_runtime_channel(
+        self, channel_id: str, channel_version: int, model_id: str
+    ) -> dict[str, Any]:
+        """Resolve one frozen channel version without following current defaults."""
+        with self._connect() as conn:
+            channel = conn.execute(
+                "SELECT * FROM model_channels WHERE id=?", (channel_id,)
+            ).fetchone()
+            version = conn.execute(
+                """
+                SELECT * FROM model_channel_versions
+                WHERE channel_id=? AND version_number=?
+                """,
+                (channel_id, channel_version),
+            ).fetchone()
+        if channel is None or version is None:
+            raise SettingsError("任务引用的模型通道版本不存在")
+        models = json.loads(version["models_json"] or "[]")
+        if model_id not in {str(item.get("model_id")) for item in models}:
+            raise SettingsError("任务引用的模型不存在于冻结通道版本")
+        return {
+            "name": str(channel["name"]),
+            "api_url": str(version["base_url"]).rstrip("/") + "/chat/completions",
+            "api_key": self.resolve_credential(str(channel["id"])),
+            "model_name": model_id,
+            "timeout": float(version["timeout_seconds"]),
+        }
+
     @staticmethod
     def _score_columns(conn: sqlite3.Connection) -> set[str]:
         return {str(row[1]) for row in conn.execute("PRAGMA table_info(photo_scores)")}

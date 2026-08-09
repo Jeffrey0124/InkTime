@@ -1,11 +1,12 @@
 # 飞牛 NAS Docker 部署
 
-本项目推荐使用一个镜像、两个常驻容器：
+本项目推荐使用一个镜像、三个常驻容器：
 
 - `inktime-web`：运行 `python server.py`，提供 WebUI 和 `/push/latest.bmp`。
 - `inktime-scheduler`：运行 `python scheduler.py`，按时间自动发布 BMP。
+- `inktime-analysis-worker`：运行 `python analysis_worker.py`，自动消费分析任务队列。
 
-分析照片和批量渲染不常驻，使用 `docker compose run --rm worker ...` 按需执行。
+旧分析脚本、批量渲染和运维测试仍使用 `docker compose run --rm worker ...` 按需执行。
 
 ## 目录规划
 
@@ -60,7 +61,7 @@ sudo docker compose exec web python -m flask --app server.py reset-admin-passwor
 
 ```bash
 docker compose build
-docker compose up -d web scheduler
+docker compose up -d web scheduler analysis-worker
 ```
 
 打开：

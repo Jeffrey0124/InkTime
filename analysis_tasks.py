@@ -450,6 +450,16 @@ class AnalysisTaskService:
                 """,
                 (task_id,),
             ).fetchone()
+            current = conn.execute(
+                """
+                SELECT ati.photo_id, p.filename
+                FROM analysis_task_items ati
+                JOIN photos p ON p.id=ati.photo_id
+                WHERE ati.task_id=? AND ati.status='running'
+                ORDER BY ati.position LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
         finally:
             conn.close()
         if row is None:
@@ -466,5 +476,10 @@ class AnalysisTaskService:
             "processed_count": int(row["processed_count"]),
             "succeeded_count": int(row["succeeded_count"]),
             "failed_count": int(row["failed_count"]),
+            "remaining_count": max(
+                0, int(row["total_count"]) - int(row["processed_count"])
+            ),
+            "current_photo_id": int(current["photo_id"]) if current else None,
+            "current_filename": str(current["filename"] or "") if current else None,
             "created_at": row["created_at"],
         }

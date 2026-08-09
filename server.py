@@ -772,6 +772,7 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
 
 def _render_analysis_task_page(task: dict[str, Any]) -> str:
     mode = "重新分析" if task["task_type"] == "reanalysis" else "增量分析"
+    progress_heading = "任务已进入队列" if task["status"] == "queued" else "任务执行进度"
     levels = "".join(
         f"<li><span>{index + 1}</span><strong>{_esc(item['channel_name'])}</strong><small>{_esc(item['model_id'])} · v{_esc(item['channel_version'])}</small></li>"
         for index, item in enumerate(task["strategy"].get("execution_levels") or [])
@@ -780,8 +781,8 @@ def _render_analysis_task_page(task: dict[str, Any]) -> str:
     <section class="screen analysis-task-screen" aria-labelledby="analysis-task-title">
       <div class="section-heading"><div><p class="kicker">Analysis Task</p><h2 id="analysis-task-title">{_esc(task['name'])}</h2></div><a class="button" href="/library">返回素材库</a></div>
       <section class="task-created-panel">
-        <div><span class="state-label">{_esc(task['status'])}</span><h3>任务已进入队列</h3><p>{_esc(mode)} · {_esc(task['total_count'])} 张 · 并发 {_esc(task['concurrency'])} · 队列位置 {_esc(task['queue_position'])}</p></div>
-        <dl><div><dt>已处理</dt><dd>{_esc(task['processed_count'])}</dd></div><div><dt>成功</dt><dd>{_esc(task['succeeded_count'])}</dd></div><div><dt>失败</dt><dd>{_esc(task['failed_count'])}</dd></div></dl>
+        <div><span class="state-label">{_esc(task['status'])}</span><h3>{_esc(progress_heading)}</h3><p>{_esc(mode)} · {_esc(str(task['total_count']))} 张 · 并发 {_esc(str(task['concurrency']))} · 当前 {_esc(task.get('current_filename') or '等待领取')}</p></div>
+        <dl><div><dt>已处理</dt><dd>{_esc(str(task['processed_count']))}</dd></div><div><dt>成功</dt><dd>{_esc(str(task['succeeded_count']))}</dd></div><div><dt>失败</dt><dd>{_esc(str(task['failed_count']))}</dd></div><div><dt>剩余</dt><dd>{_esc(str(task['remaining_count']))}</dd></div></dl>
       </section>
       <section class="task-strategy-panel"><p class="kicker">Frozen Strategy</p><h3>模型执行策略</h3><ol>{levels}</ol><p>该任务已冻结素材集合和非敏感模型配置；凭据将在 Worker 执行时读取。</p></section>
     </section>

@@ -41,13 +41,13 @@ python scripts/validate_webui.py --base-url http://127.0.0.1:8766
 
 ## NAS/Docker 验收
 
-在 NAS 项目目录构建并启动两个常驻容器：
+在 NAS 项目目录构建并启动三个常驻容器：
 
 ```bash
 sudo docker compose build
-sudo docker compose up -d web scheduler
+sudo docker compose up -d web scheduler analysis-worker
 sudo docker compose ps
-sudo docker compose logs --tail=100 web scheduler
+sudo docker compose logs --tail=100 web scheduler analysis-worker
 ```
 
 如尚未生成推送产物，执行一次 worker：
