@@ -85,6 +85,40 @@ class LibraryScannerTests(unittest.TestCase):
                 {"original.jpg": "missing", "copy.jpg": "present", "renamed.jpg": "present"},
             )
 
+    def test_multiple_missing_sources_are_not_merged_into_one_new_file(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "library"
+            library.mkdir()
+            first = library / "first.jpg"
+            second = library / "second.jpg"
+            Image.new("RGB", (23, 17), "purple").save(first)
+            shutil.copyfile(first, second)
+            payload = first.read_bytes()
+            db_path = root / "photos.db"
+            scanner = LibraryScanner(db_path, library)
+            scanner.scan(trigger="startup")
+
+            first.unlink()
+            second.unlink()
+            replacement = library / "replacement.jpg"
+            replacement.write_bytes(payload)
+            scanner.scan(trigger="manual")
+
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT filename, file_status FROM photos ORDER BY filename"
+            ).fetchall()
+            conn.close()
+            self.assertEqual(
+                rows,
+                [
+                    ("first.jpg", "missing"),
+                    ("replacement.jpg", "present"),
+                    ("second.jpg", "missing"),
+                ],
+            )
+
     def test_existing_excluded_copy_is_not_treated_as_a_missing_move_source(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
