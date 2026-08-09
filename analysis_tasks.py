@@ -487,6 +487,8 @@ class AnalysisTaskService:
                     "UPDATE analysis_tasks SET status=?, queue_position=0, updated_at=? WHERE id=?",
                     (next_status, now, task_id),
                 )
+                conn.execute("DELETE FROM analysis_task_circuits WHERE task_id=?", (task_id,))
+                conn.execute("UPDATE analysis_task_runtime SET pause_reason=NULL WHERE task_id=?", (task_id,))
             else:
                 conn.execute(
                     "UPDATE analysis_tasks SET status=?, updated_at=? WHERE id=?",
@@ -588,10 +590,12 @@ class AnalysisTaskService:
         try:
             row = conn.execute(
                 """
-                SELECT id, name, task_type, status, queue_position, concurrency,
+                SELECT analysis_tasks.id, name, task_type, status, queue_position, concurrency,
                        model_strategy_json, total_count, processed_count,
-                       succeeded_count, failed_count, created_at
-                FROM analysis_tasks WHERE id=?
+                       succeeded_count, failed_count, created_at, runtime.pause_reason
+                FROM analysis_tasks LEFT JOIN analysis_task_runtime runtime
+                  ON runtime.task_id=analysis_tasks.id
+                WHERE analysis_tasks.id=?
                 """,
                 (task_id,),
             ).fetchone()
@@ -627,4 +631,5 @@ class AnalysisTaskService:
             "current_photo_id": int(current["photo_id"]) if current else None,
             "current_filename": str(current["filename"] or "") if current else None,
             "created_at": row["created_at"],
+            "pause_reason": row["pause_reason"] or "",
         }
