@@ -22,6 +22,7 @@ from flask import Flask, abort, g, jsonify, redirect, request, send_file, sessio
 from PIL import Image, ImageOps
 
 from analysis_tasks import AnalysisTaskError, AnalysisTaskService
+from analysis_worker import AnalysisWorker, AnalysisWorkerRunner, LegacyAnalysisExecutor
 from photo_identity import ensure_photo_identity_schema
 from model_provider import ModelProviderClient
 from library_scanner import LibraryScanner, PeriodicScanScheduler, ScanCoordinator
@@ -1239,6 +1240,8 @@ def create_app(
     scan_root: str | Path | None = None,
     scan_startup: bool | None = None,
     scan_interval_minutes: float | None = None,
+    analysis_worker_enabled: bool | None = None,
+    analysis_executor=None,
 ) -> Flask:
     app = Flask(__name__)
     auth_enabled = True if auth_required is None else bool(auth_required)
@@ -1293,6 +1296,17 @@ def create_app(
     app.extensions["web_auth"] = auth
     app.extensions["settings_store"] = settings_store
     app.extensions["analysis_task_service"] = analysis_task_service
+    should_start_analysis_worker = (
+        bool(_config_value("ANALYSIS_WORKER_ENABLED", True)) and db_path is None
+        if analysis_worker_enabled is None
+        else bool(analysis_worker_enabled)
+    )
+    if should_start_analysis_worker:
+        executor = analysis_executor or LegacyAnalysisExecutor(settings_store)
+        analysis_runner = AnalysisWorkerRunner(AnalysisWorker(db, executor))
+        analysis_runner.start()
+        app.extensions["analysis_worker_runner"] = analysis_runner
+        atexit.register(lambda: analysis_runner.shutdown(wait=False))
     library_root = _resolve_path(scan_root or _config_value("IMAGE_DIR", "./sample_photos"))
     scanner = LibraryScanner(
         db,
@@ -2049,7 +2063,7 @@ def create_app(
     return app
 
 
-app = create_app()
+app = create_app(analysis_worker_enabled=__name__ == "__main__")
 
 
 if __name__ == "__main__":

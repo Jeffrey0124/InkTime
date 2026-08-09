@@ -83,6 +83,11 @@ DISPLAY_PREVIEW_DIR = "/data/output/previews"
 SCAN_ON_STARTUP = _str("SCAN_ON_STARTUP", "true").lower() not in {"0", "false", "no"}
 SCAN_INTERVAL_MINUTES = _int("SCAN_INTERVAL_MINUTES", 30)
 SCAN_EXCLUDE_PATTERNS = _csv("SCAN_EXCLUDE_PATTERNS", [])
+ANALYSIS_WORKER_ENABLED = _str("ANALYSIS_WORKER_ENABLED", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 WORLD_CITIES_CSV = "./data/world_cities_zh.csv"
 CITY_GRID_DEG = _float("CITY_GRID_DEG", 1.0)

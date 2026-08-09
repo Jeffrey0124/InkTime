@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,7 +8,7 @@ from tempfile import TemporaryDirectory
 from PIL import Image
 
 from analysis_tasks import AnalysisTaskService
-from analysis_worker import AnalysisWorker
+from analysis_worker import AnalysisWorker, AnalysisWorkerRunner
 from library_scanner import LibraryScanner
 from settings_store import SettingsStore
 from web_queries import load_photos
@@ -169,6 +170,37 @@ class AnalysisWorkerTests(unittest.TestCase):
 
         self.assertIsNone(AnalysisWorker(self.db_path, FakeAnalysisExecutor()).run_once())
 
+    def test_task_level_failure_releases_queue_for_the_next_task(self):
+        broken_id = self.add_photo("bad-strategy.jpg")
+        next_id = self.add_photo("next-task.jpg")
+        broken = self.create_task([broken_id])
+        following = self.create_task([next_id])
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE analysis_tasks SET model_strategy_json='{}' WHERE id=?",
+            (broken["task_id"],),
+        )
+        conn.commit()
+        conn.close()
+        executor = FakeAnalysisExecutor()
+        worker = AnalysisWorker(self.db_path, executor)
+
+        failed = worker.run_once()
+        completed = worker.run_once()
+
+        self.assertEqual(failed["status"], "completed_with_failures")
+        self.assertEqual(failed["failed_count"], 1)
+        self.assertEqual(completed["task_id"], following["task_id"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual([call[0] for call in executor.calls], ["next-task.jpg"])
+        conn = sqlite3.connect(self.db_path)
+        occupancy = conn.execute(
+            "SELECT COUNT(*) FROM analysis_task_occupancy WHERE task_id=?",
+            (broken["task_id"],),
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(occupancy, 0)
+
     def test_task_progress_exposes_current_photo_while_executor_runs(self):
         photo_id = self.add_photo("waiting.jpg")
         created = self.create_task([photo_id])
@@ -192,6 +224,25 @@ class AnalysisWorkerTests(unittest.TestCase):
         release.set()
         thread.join(5)
         self.assertFalse(thread.is_alive())
+
+    def test_background_runner_automatically_claims_a_new_task(self):
+        photo_id = self.add_photo("automatic.jpg")
+        runner = AnalysisWorkerRunner(
+            AnalysisWorker(self.db_path, FakeAnalysisExecutor()), poll_interval=0.01
+        )
+        runner.start()
+        try:
+            created = self.create_task([photo_id])
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                task = self.tasks.get_task(created["task_id"])
+                if task["status"] == "completed":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(task["status"], "completed")
+            self.assertEqual(task["processed_count"], 1)
+        finally:
+            runner.shutdown(wait=True)
 
 
 if __name__ == "__main__":

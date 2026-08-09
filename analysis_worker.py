@@ -10,11 +10,13 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from photo_identity import ensure_photo_identity_schema
+from photo_scores_schema import ensure_photo_scores_schema
 from settings_store import SettingsStore
 
 
@@ -23,41 +25,6 @@ AnalysisExecutor = Callable[[Path, dict[str, Any]], dict[str, Any]]
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-
-
-def _ensure_photo_scores(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS photo_scores (
-          path TEXT PRIMARY KEY, caption TEXT, type TEXT,
-          memory_score REAL, beauty_score REAL, reason TEXT,
-          width INTEGER, height INTEGER, orientation TEXT, used_at TEXT,
-          exif_json TEXT, raw_json TEXT, exif_datetime TEXT, exif_make TEXT,
-          exif_model TEXT, exif_iso INTEGER, exif_exposure_time REAL,
-          exif_f_number REAL, exif_focal_length REAL, exif_gps_lat REAL,
-          exif_gps_lon REAL, exif_gps_alt REAL, side_caption TEXT,
-          exif_city TEXT, location_hint TEXT, analysis_channel TEXT,
-          analysis_model TEXT, crop_focus_json TEXT
-        )
-        """
-    )
-    definitions = {
-        "caption": "TEXT", "type": "TEXT", "memory_score": "REAL",
-        "beauty_score": "REAL", "reason": "TEXT", "width": "INTEGER",
-        "height": "INTEGER", "orientation": "TEXT", "used_at": "TEXT",
-        "exif_json": "TEXT", "raw_json": "TEXT", "exif_datetime": "TEXT",
-        "exif_make": "TEXT", "exif_model": "TEXT", "exif_iso": "INTEGER",
-        "exif_exposure_time": "REAL", "exif_f_number": "REAL",
-        "exif_focal_length": "REAL", "exif_gps_lat": "REAL",
-        "exif_gps_lon": "REAL", "exif_gps_alt": "REAL",
-        "side_caption": "TEXT", "exif_city": "TEXT", "location_hint": "TEXT",
-        "analysis_channel": "TEXT", "analysis_model": "TEXT",
-        "crop_focus_json": "TEXT",
-    }
-    existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(photo_scores)")}
-    for name, definition in definitions.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE photo_scores ADD COLUMN {name} {definition}")
 
 
 class LegacyAnalysisExecutor:
@@ -75,13 +42,11 @@ class LegacyAnalysisExecutor:
             int(level["channel_version"]),
             str(level["model_id"]),
         )
-        analyze_photos.API_CHANNELS = [runtime]
-        analyze_photos._channel_cooldown_until = [0.0]
-        analyze_photos._channel_inflight = [0]
-        analyze_photos.TIMEOUT = runtime["timeout"]
         if self._city_resolver is None:
             self._city_resolver = analyze_photos.get_city_resolver()
-        result = analyze_photos._process_one_photo(source, self._city_resolver)
+        result = analyze_photos.process_one_photo(
+            source, self._city_resolver, runtime_channel=runtime
+        )
         if result is None:
             raise RuntimeError("模型分析未返回有效结果")
         return result
@@ -94,7 +59,7 @@ class AnalysisWorker:
         ensure_photo_identity_schema(self.db_path)
         conn = self._connect()
         try:
-            _ensure_photo_scores(conn)
+            ensure_photo_scores_schema(conn)
             conn.commit()
         finally:
             conn.close()
@@ -320,23 +285,57 @@ class AnalysisWorker:
         finally:
             conn.close()
 
+    def _fail_task(self, task_id: int, exc: Exception) -> None:
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE analysis_task_items
+                SET status='failed', attempt_count=CASE
+                      WHEN status='running' THEN attempt_count ELSE attempt_count + 1 END,
+                    error_code=?, error_message=?, finished_at=?
+                WHERE task_id=? AND status IN ('queued', 'running')
+                """,
+                (type(exc).__name__, str(exc)[:1000], now, task_id),
+            )
+            self._refresh_counts(conn, task_id, now)
+            conn.execute(
+                """
+                UPDATE analysis_tasks SET status='completed_with_failures',
+                    finished_at=?, updated_at=? WHERE id=?
+                """,
+                (now, now, task_id),
+            )
+            conn.execute("DELETE FROM analysis_task_occupancy WHERE task_id=?", (task_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def run_once(self) -> dict[str, Any] | None:
         task = self._claim_task()
         if task is None:
             return None
         task_id = int(task["id"])
-        strategy = json.loads(task["model_strategy_json"])
-        levels = strategy.get("execution_levels") or []
-        if not levels:
-            raise RuntimeError("任务没有冻结的模型执行层级")
-        level = dict(levels[0])
-        while (item := self._next_item(task_id)) is not None:
-            try:
-                result = self.executor(Path(str(item["path"])), level)
-                self._save_success(task_id, item, result, level)
-            except Exception as exc:
-                self._save_failure(task_id, int(item["id"]), exc)
-        self._finish_task(task_id)
+        try:
+            strategy = json.loads(task["model_strategy_json"])
+            levels = strategy.get("execution_levels") or []
+            if not levels:
+                raise RuntimeError("任务没有冻结的模型执行层级")
+            level = dict(levels[0])
+            while (item := self._next_item(task_id)) is not None:
+                try:
+                    result = self.executor(Path(str(item["path"])), level)
+                    self._save_success(task_id, item, result, level)
+                except Exception as exc:
+                    self._save_failure(task_id, int(item["id"]), exc)
+            self._finish_task(task_id)
+        except Exception as exc:
+            self._fail_task(task_id, exc)
         conn = self._connect()
         try:
             row = conn.execute("SELECT * FROM analysis_tasks WHERE id=?", (task_id,)).fetchone()
@@ -358,6 +357,45 @@ class AnalysisWorker:
         while True:
             if self.run_once() is None:
                 time.sleep(max(0.1, poll_interval))
+
+
+class AnalysisWorkerRunner:
+    """Run one AnalysisWorker in a stoppable daemon thread."""
+
+    def __init__(self, worker: AnalysisWorker, poll_interval: float = 2.0) -> None:
+        self.worker = worker
+        self.poll_interval = max(0.05, float(poll_interval))
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="analysis-worker",
+            daemon=True,
+        )
+        self.running = False
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self.running = True
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                processed = self.worker.run_once()
+            except Exception as exc:
+                print(f"[WARN] 分析 Worker 轮询失败：{exc}")
+                processed = None
+            if processed is None:
+                self._stop.wait(self.poll_interval)
+
+    def shutdown(self, wait: bool = False) -> None:
+        if not self.running:
+            return
+        self.running = False
+        self._stop.set()
+        if wait and self._thread.is_alive():
+            self._thread.join(timeout=5)
 
 
 def main() -> None:

@@ -177,23 +177,22 @@ SCAN_EXCLUDE_PATTERNS=private/**,exports/**
 
 管理员登录后访问 `/library`，可以按文件/分析状态、拍摄日期、GPS、类型、目录和文件名筛选，并按拍摄日期、入库时间、文件名或文件大小双向排序。
 
-本地开发时另开一个终端运行 `python analysis_worker.py`，它会在全局分析队列空闲时自动领取 WebUI 创建的任务。需要只消费一个任务进行调试时使用 `python analysis_worker.py --once`。
+WebUI 默认在后台自动领取分析任务；可通过 `ANALYSIS_WORKER_ENABLED=false` 关闭。需要独立调试时可运行 `python analysis_worker.py`，只消费一个任务则使用 `python analysis_worker.py --once`。
 
 ## 飞牛 NAS Docker 部署
 
-推荐使用 Docker Compose 的三个常驻容器形态：
+推荐使用 Docker Compose 的双容器形态：
 
 - `web`：运行 `python server.py`，提供 WebUI 和 `/push/latest.bmp`。
 - `scheduler`：运行 `python scheduler.py`，负责定时自动推送。
-- `analysis-worker`：运行 `python analysis_worker.py`，自动消费 WebUI 创建的分析任务。
-- `worker`：不常驻，只用于按需执行旧分析、渲染和单次推送测试。
+- `worker`：不常驻，用于消费分析任务、批量渲染和单次推送测试。
 
 快速命令：
 
 ```bash
 cp .env.example .env
 docker compose build
-docker compose up -d web scheduler analysis-worker
+docker compose up -d web scheduler
 docker compose run --rm worker analyze_photos.py -j 1 --debug
 docker compose run --rm worker render_photopainter.py
 docker compose run --rm worker scheduler.py --run-once --slot 07:00

@@ -59,6 +59,7 @@ DISPLAY_PREVIEW_DIR = "./output/previews"
 SCAN_ON_STARTUP = True
 SCAN_INTERVAL_MINUTES = 30
 SCAN_EXCLUDE_PATTERNS = ["private/**"]
+ANALYSIS_WORKER_ENABLED = True
 
 # 离线中文城市名索引，用于根据照片 GPS 信息补充城市名。
 WORLD_CITIES_CSV = "./data/world_cities_zh.csv"

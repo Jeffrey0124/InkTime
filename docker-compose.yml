@@ -31,18 +31,6 @@ services:
       - "${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/data"
     restart: unless-stopped
 
-  analysis-worker:
-    build: .
-    image: inktime-photopainter-local:latest
-    container_name: inktime-analysis-worker
-    command: ["python", "analysis_worker.py"]
-    env_file:
-      - .env
-    volumes:
-      - "${PHOTO_DIR:?请在 .env 中设置 PHOTO_DIR}:/photos:ro"
-      - "${DATA_DIR:?请在 .env 中设置 DATA_DIR}:/data"
-    restart: unless-stopped
-
   worker:
     build: .
     image: inktime-photopainter-local:latest
