@@ -26,7 +26,162 @@ def _create_photo_scores(conn: sqlite3.Connection) -> None:
     )
 
 
+def _create_legacy_photos(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE photos (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          path TEXT NOT NULL UNIQUE,
+          file_hash TEXT,
+          size_bytes INTEGER,
+          mtime REAL,
+          exists_on_disk INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'analyzed',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          missing_at TEXT
+        )
+        """
+    )
+
+
 class PhotoIdentityMigrationTests(unittest.TestCase):
+    def test_orphaned_legacy_photo_uses_legacy_file_state_and_pending_analysis(self):
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "photos.db"
+            now = "2026-08-09T00:00:00+00:00"
+            conn = sqlite3.connect(db_path)
+            _create_legacy_photos(conn)
+            conn.execute(
+                """
+                INSERT INTO photos
+                (path, exists_on_disk, status, created_at, updated_at, missing_at)
+                VALUES ('orphan.jpg', 0, 'missing', ?, ?, ?)
+                """,
+                (now, now, now),
+            )
+            conn.commit()
+            conn.close()
+
+            ensure_photo_identity_schema(db_path)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                state = conn.execute(
+                    """
+                    SELECT file_status, analysis_status, visibility_status
+                    FROM photos WHERE path = 'orphan.jpg'
+                    """
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertEqual(state, ("missing", "pending", "active"))
+
+    def test_analysis_versions_reject_update_and_delete(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "photo.jpg"
+            source.write_bytes(b"photo")
+            db_path = root / "photos.db"
+            conn = sqlite3.connect(db_path)
+            _create_photo_scores(conn)
+            conn.execute(
+                """
+                INSERT INTO photo_scores
+                (path, caption, type, memory_score, beauty_score, reason)
+                VALUES (?, 'caption', 'daily', 80, 70, 'reason')
+                """,
+                (str(source),),
+            )
+            conn.commit()
+            conn.close()
+
+            ensure_photo_identity_schema(db_path)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                version_id = conn.execute("SELECT id FROM analysis_versions").fetchone()[0]
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                    conn.execute(
+                        "UPDATE analysis_versions SET caption = 'changed' WHERE id = ?",
+                        (version_id,),
+                    )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                    conn.execute(
+                        "DELETE FROM analysis_versions WHERE id = ?",
+                        (version_id,),
+                    )
+            finally:
+                conn.close()
+
+    def test_migration_restarts_after_transaction_failure(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "photo.jpg"
+            source.write_bytes(b"photo")
+            db_path = root / "photos.db"
+            now = "2026-08-09T00:00:00+00:00"
+            conn = sqlite3.connect(db_path)
+            _create_photo_scores(conn)
+            conn.execute(
+                """
+                INSERT INTO photo_scores
+                (path, caption, type, memory_score, beauty_score, reason)
+                VALUES (?, 'caption', 'daily', 80, 70, 'reason')
+                """,
+                (str(source),),
+            )
+            _create_legacy_photos(conn)
+            conn.execute(
+                """
+                INSERT INTO photos
+                (path, exists_on_disk, status, created_at, updated_at)
+                VALUES (?, 0, 'missing', ?, ?)
+                """,
+                (str(source), now, now),
+            )
+            conn.execute(
+                """
+                CREATE TRIGGER fail_migration
+                BEFORE UPDATE ON photos
+                BEGIN
+                  SELECT RAISE(ABORT, 'injected migration failure');
+                END
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "injected migration failure"):
+                ensure_photo_identity_schema(db_path)
+
+            conn = sqlite3.connect(db_path)
+            conn.execute("DROP TRIGGER fail_migration")
+            conn.commit()
+            conn.close()
+
+            ensure_photo_identity_schema(db_path)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                photo = conn.execute(
+                    """
+                    SELECT file_status, analysis_status, current_analysis_version_id
+                    FROM photos WHERE path = ?
+                    """,
+                    (str(source),),
+                ).fetchone()
+                version_count = conn.execute(
+                    "SELECT COUNT(*) FROM analysis_versions"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(photo[0:2], ("present", "analyzed"))
+            self.assertIsNotNone(photo[2])
+            self.assertEqual(version_count, 1)
+
     def test_old_identity_schema_upgrade_preserves_overrides_and_push_history(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -44,22 +199,7 @@ class PhotoIdentityMigrationTests(unittest.TestCase):
                 """,
                 (str(source),),
             )
-            conn.execute(
-                """
-                CREATE TABLE photos (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  path TEXT NOT NULL UNIQUE,
-                  file_hash TEXT,
-                  size_bytes INTEGER,
-                  mtime REAL,
-                  exists_on_disk INTEGER NOT NULL DEFAULT 1,
-                  status TEXT NOT NULL DEFAULT 'analyzed',
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  missing_at TEXT
-                )
-                """
-            )
+            _create_legacy_photos(conn)
             photo_id = conn.execute(
                 """
                 INSERT INTO photos
@@ -153,7 +293,6 @@ class PhotoIdentityMigrationTests(unittest.TestCase):
                         "model_channels",
                         "model_channel_versions",
                         "notifications",
-                        "app_settings",
                     )
                 }
             finally:
@@ -166,7 +305,6 @@ class PhotoIdentityMigrationTests(unittest.TestCase):
                     "model_channels",
                     "model_channel_versions",
                     "notifications",
-                    "app_settings",
                 }.issubset(tables)
             )
             self.assertTrue(
@@ -194,8 +332,6 @@ class PhotoIdentityMigrationTests(unittest.TestCase):
                     columns["notifications"]
                 )
             )
-            self.assertEqual(columns["app_settings"], {"key", "value_json", "updated_at"})
-
     def test_migration_backfills_asset_states_and_one_analysis_version(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

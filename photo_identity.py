@@ -63,7 +63,7 @@ def _photo_scores_paths(conn: sqlite3.Connection) -> list[str]:
     return [str(row[0]) for row in rows]
 
 
-def _ensure_tables(conn: sqlite3.Connection) -> None:
+def _ensure_photo_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS photos (
@@ -125,6 +125,9 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _ensure_analysis_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS analysis_versions (
@@ -146,6 +149,24 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
           UNIQUE(photo_id, version_number),
           FOREIGN KEY(photo_id) REFERENCES photos(id)
         )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS analysis_versions_immutable_update
+        BEFORE UPDATE ON analysis_versions
+        BEGIN
+          SELECT RAISE(ABORT, 'analysis_versions are immutable');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS analysis_versions_immutable_delete
+        BEFORE DELETE ON analysis_versions
+        BEGIN
+          SELECT RAISE(ABORT, 'analysis_versions are immutable');
+        END
         """
     )
     conn.execute(
@@ -192,6 +213,15 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analysis_tasks_status ON analysis_tasks(status, queue_position)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analysis_task_items_task_status ON analysis_task_items(task_id, status)"
+    )
+
+
+def _ensure_model_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS model_channels (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -223,6 +253,9 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _ensure_notification_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS notifications (
@@ -238,23 +271,47 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS app_settings (
-          key TEXT PRIMARY KEY,
-          value_json TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_analysis_tasks_status ON analysis_tasks(status, queue_position)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_analysis_task_items_task_status ON analysis_task_items(task_id, status)"
-    )
-    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read, created_at)"
     )
+
+
+def _ensure_tables(conn: sqlite3.Connection) -> None:
+    _ensure_photo_tables(conn)
+    _ensure_analysis_tables(conn)
+    _ensure_model_tables(conn)
+    _ensure_notification_tables(conn)
+
+
+def _backfill_legacy_photo_states(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE photos
+        SET file_status = 'missing'
+        WHERE file_status = 'present'
+          AND (exists_on_disk = 0 OR status = 'missing')
+        """
+    )
+    if _table_exists(conn, "photo_scores"):
+        conn.execute(
+            """
+            UPDATE photos
+            SET analysis_status = 'pending'
+            WHERE analysis_status = 'analyzed'
+              AND current_analysis_version_id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM photo_scores WHERE photo_scores.path = photos.path
+              )
+            """
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE photos
+            SET analysis_status = 'pending'
+            WHERE analysis_status = 'analyzed'
+              AND current_analysis_version_id IS NULL
+            """
+        )
 
 
 def _legacy_value(row: sqlite3.Row, column: str):
@@ -326,6 +383,7 @@ def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
     conn = sqlite3.connect(db)
     try:
         _ensure_tables(conn)
+        _backfill_legacy_photo_states(conn)
         inserted = 0
         updated = 0
         missing_count = 0
