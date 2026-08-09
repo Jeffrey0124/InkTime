@@ -290,6 +290,8 @@ class PhotoIdentityMigrationTests(unittest.TestCase):
                     for table in (
                         "analysis_tasks",
                         "analysis_task_items",
+                        "analysis_task_runtime",
+                        "analysis_task_circuits",
                         "model_channels",
                         "model_channel_versions",
                         "notifications",
@@ -302,6 +304,8 @@ class PhotoIdentityMigrationTests(unittest.TestCase):
                 {
                     "analysis_tasks",
                     "analysis_task_items",
+                    "analysis_task_runtime",
+                    "analysis_task_circuits",
                     "model_channels",
                     "model_channel_versions",
                     "notifications",

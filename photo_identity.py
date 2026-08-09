@@ -235,6 +235,28 @@ def _ensure_analysis_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_analysis_task_items_task_status ON analysis_task_items(task_id, status)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS analysis_task_runtime (
+          task_id INTEGER PRIMARY KEY,
+          pause_reason TEXT,
+          recovery_failures INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY(task_id) REFERENCES analysis_tasks(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS analysis_task_circuits (
+          task_id INTEGER NOT NULL,
+          execution_level INTEGER NOT NULL,
+          reason TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(task_id, execution_level),
+          FOREIGN KEY(task_id) REFERENCES analysis_tasks(id)
+        )
+        """
+    )
 
 
 def _ensure_scan_tables(conn: sqlite3.Connection) -> None:

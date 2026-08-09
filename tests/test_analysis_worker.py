@@ -158,12 +158,12 @@ class AnalysisWorkerTests(unittest.TestCase):
         self.assertEqual(occupied, 0)
         self.assertEqual([item["photo_id"] for item in load_photos(self.db_path)], [second_id])
 
-    def test_running_task_blocks_claiming_another_task(self):
+    def test_paused_task_blocks_claiming_another_task(self):
         photo_id = self.add_photo("busy.jpg")
         created = self.create_task([photo_id])
         conn = sqlite3.connect(self.db_path)
         conn.execute(
-            "UPDATE analysis_tasks SET status='running' WHERE id=?", (created["task_id"],)
+            "UPDATE analysis_tasks SET status='paused' WHERE id=?", (created["task_id"],)
         )
         conn.commit()
         conn.close()

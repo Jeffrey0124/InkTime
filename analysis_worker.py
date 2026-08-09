@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import json
 import os
@@ -21,6 +22,14 @@ from settings_store import SettingsStore
 
 
 AnalysisExecutor = Callable[[Path, dict[str, Any]], dict[str, Any]]
+
+
+class AnalysisExecutionError(RuntimeError):
+    """A model execution error with a stable retry classification."""
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def _now() -> str:
@@ -60,6 +69,54 @@ class AnalysisWorker:
         conn = self._connect()
         try:
             ensure_photo_scores_schema(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        self._recover_interrupted_tasks()
+
+    def _recover_interrupted_tasks(self) -> None:
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            tasks = conn.execute(
+                "SELECT id FROM analysis_tasks WHERE status='running'"
+            ).fetchall()
+            for task in tasks:
+                task_id = int(task["id"])
+                recovery_row = conn.execute(
+                    "SELECT recovery_failures FROM analysis_task_runtime WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                failures = int(recovery_row["recovery_failures"]) if recovery_row else 0
+                if failures >= 2:
+                    conn.execute(
+                        "UPDATE analysis_tasks SET status='paused', updated_at=? WHERE id=?",
+                        (now, task_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO analysis_task_runtime(task_id, pause_reason, recovery_failures) "
+                        "VALUES (?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET "
+                        "pause_reason=excluded.pause_reason, recovery_failures=excluded.recovery_failures",
+                        (task_id, "Worker 连续恢复失败，已暂停队列", failures + 1),
+                    )
+                    continue
+                conn.execute(
+                    "UPDATE analysis_task_items SET status='queued', current_execution_level=NULL, "
+                    "started_at=NULL WHERE task_id=? AND status='running' "
+                    "AND analysis_version_id IS NULL",
+                    (task_id,),
+                )
+                conn.execute(
+                    "UPDATE analysis_tasks SET status='queued', updated_at=? WHERE id=?",
+                    (now, task_id),
+                )
+                conn.execute(
+                    "INSERT INTO analysis_task_runtime(task_id, recovery_failures) VALUES (?, 1) "
+                    "ON CONFLICT(task_id) DO UPDATE SET "
+                    "recovery_failures=analysis_task_runtime.recovery_failures + 1",
+                    (task_id,),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -177,6 +234,78 @@ class AnalysisWorker:
         finally:
             conn.close()
 
+    def _is_circuit_open(self, task_id: int, level_index: int) -> bool:
+        conn = self._connect()
+        try:
+            return conn.execute("SELECT 1 FROM analysis_task_circuits WHERE task_id=? AND execution_level=?", (task_id, level_index)).fetchone() is not None
+        finally:
+            conn.close()
+
+    def _open_circuit(self, task_id: int, level_index: int, reason: str) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO analysis_task_circuits"
+                "(task_id, execution_level, reason, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, level_index, reason[:1000], _now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _set_item_level(self, item_id: int, level_index: int) -> None:
+        conn = self._connect()
+        try:
+            conn.execute("UPDATE analysis_task_items SET current_execution_level=? WHERE id=?", (level_index, item_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _pause_unavailable(self, task_id: int, item_id: int, reason: str) -> None:
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE analysis_task_items SET status='queued', current_execution_level=NULL, error_code='all_levels_unavailable', error_message=? WHERE id=? AND status='running'", (reason[:1000], item_id))
+            conn.execute("UPDATE analysis_tasks SET status='paused', updated_at=? WHERE id=?", (now, task_id))
+            conn.execute("INSERT INTO analysis_task_runtime(task_id, pause_reason) VALUES (?, ?) ON CONFLICT(task_id) DO UPDATE SET pause_reason=excluded.pause_reason", (task_id, reason[:1000]))
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _is_retryable(exc: Exception) -> bool:
+        if isinstance(exc, AnalysisExecutionError):
+            return exc.retryable
+        message = str(exc).lower()
+        deterministic_markers = ("401", "403", "unauthorized", "forbidden", "invalid api key", "model not found", "model_not_found")
+        return not any(marker in message for marker in deterministic_markers)
+
+    def _process_item(self, task_id: int, item: sqlite3.Row, levels: list[dict[str, Any]], rounds: int) -> str:
+        attempted = False
+        for _round in range(rounds):
+            for level_index, level in enumerate(levels):
+                if self._is_circuit_open(task_id, level_index):
+                    continue
+                attempted = True
+                self._set_item_level(int(item["id"]), level_index)
+                try:
+                    result = self.executor(Path(str(item["path"])), level)
+                    self._save_success(task_id, item, result, level)
+                    return "completed"
+                except Exception as exc:
+                    if not self._is_retryable(exc):
+                        self._open_circuit(task_id, level_index, str(exc))
+                    last_error = exc
+            if all(self._is_circuit_open(task_id, index) for index in range(len(levels))):
+                self._pause_unavailable(task_id, int(item["id"]), "全部模型执行级不可用：请更新凭据后恢复任务")
+                return "paused"
+        if not attempted:
+            self._pause_unavailable(task_id, int(item["id"]), "全部模型执行级不可用：请更新凭据后恢复任务")
+            return "paused"
+        self._save_failure(task_id, int(item["id"]), last_error)
+        return "failed"
+
     @staticmethod
     def _json_text(value: Any, default: str = "") -> str:
         if value in (None, ""):
@@ -264,6 +393,10 @@ class AnalysisWorker:
                 (version_id, now, item["id"]),
             )
             self._refresh_counts(conn, task_id, now)
+            conn.execute(
+                "UPDATE analysis_task_runtime SET recovery_failures=0 WHERE task_id=?",
+                (task_id,),
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -371,19 +504,20 @@ class AnalysisWorker:
             levels = strategy.get("execution_levels") or []
             if not levels:
                 raise RuntimeError("任务没有冻结的模型执行层级")
-            level = dict(levels[0])
+            levels = [dict(level) for level in levels]
+            rounds = max(1, min(2, int(strategy.get("max_request_rounds") or 2)))
+            concurrency = max(1, min(4, int(task["concurrency"])))
             while True:
                 if self._apply_control_boundary(task_id) is not None:
                     break
-                item = self._next_item(task_id)
-                if item is None:
+                items = [item for _ in range(concurrency) if (item := self._next_item(task_id))]
+                if not items:
                     self._finish_task(task_id)
                     break
-                try:
-                    result = self.executor(Path(str(item["path"])), level)
-                    self._save_success(task_id, item, result, level)
-                except Exception as exc:
-                    self._save_failure(task_id, int(item["id"]), exc)
+                with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                    outcomes = list(pool.map(lambda item: self._process_item(task_id, item, levels, rounds), items))
+                if "paused" in outcomes:
+                    break
         except Exception as exc:
             self._fail_task(task_id, exc)
         conn = self._connect()
