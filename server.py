@@ -66,6 +66,13 @@ def _config_value(name: str, default: Any) -> Any:
     return getattr(cfg, name, default)
 
 
+def _safe_task_error(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)(api[_ -]?key|token|password)\s*[=:]\s*\S+", "[已隐藏]", text)
+    text = re.sub(r"(?i)[a-z]:[/\\][^\s]+", "[本地路径]", text)
+    return text[:240]
+
+
 def _load_manifest(render_output_dir: Path) -> dict[str, Any]:
     manifest_path = render_output_dir / "manifest.json"
     if not manifest_path.exists():
@@ -1681,6 +1688,20 @@ def create_app(
         except AnalysisTaskError as exc:
             return jsonify({"ok": False, "error": str(exc), "code": exc.code}), exc.status
         return jsonify({"ok": True, "task": task}), 201
+
+    @app.get("/api/analysis-tasks")
+    def api_analysis_tasks_list():
+        return jsonify({"ok": True, "tasks": analysis_task_service.list_tasks()})
+
+    @app.get("/api/analysis-tasks/<int:task_id>/snapshot")
+    def api_analysis_task_snapshot(task_id: int):
+        task = analysis_task_service.get_task(task_id)
+        if task is None:
+            abort(404)
+        items = analysis_task_service.get_task_items(task_id)
+        for item in items:
+            item["error_message"] = _safe_task_error(item.get("error_message"))
+        return jsonify({"ok": True, "task": task, "items": items})
 
     @app.post("/api/analysis-tasks/<int:task_id>/control")
     def api_analysis_task_control(task_id: int):

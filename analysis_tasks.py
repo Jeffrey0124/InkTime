@@ -633,3 +633,35 @@ class AnalysisTaskService:
             "created_at": row["created_at"],
             "pause_reason": row["pause_reason"] or "",
         }
+
+    def list_tasks(self) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            task_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM analysis_tasks "
+                    "ORDER BY CASE WHEN status IN ('queued','running','pausing','paused','stopping') "
+                    "THEN 0 ELSE 1 END, COALESCE(queue_position, 2147483647), id DESC"
+                )
+            ]
+        finally:
+            conn.close()
+        return [task for task_id in task_ids if (task := self.get_task(task_id)) is not None]
+
+    def get_task_items(self, task_id: int) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT ati.photo_id, ati.position, ati.status, ati.attempt_count,
+                       ati.current_execution_level, ati.error_code, ati.error_message,
+                       ati.started_at, ati.finished_at, p.filename
+                FROM analysis_task_items ati JOIN photos p ON p.id=ati.photo_id
+                WHERE ati.task_id=? ORDER BY ati.position
+                """,
+                (task_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(row) for row in rows]
