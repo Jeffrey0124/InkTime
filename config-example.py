@@ -55,6 +55,11 @@ AUTH_COOKIE_SECURE = os.environ.get("INKTIME_AUTH_COOKIE_SECURE", "false").lower
 SETTINGS_MASTER_KEY = os.environ.get("INKTIME_SETTINGS_MASTER_KEY", "")
 DISPLAY_PREVIEW_DIR = "./output/previews"
 
+# 素材库扫描：启动时扫描一次，并按间隔复扫。自定义排除规则相对于 IMAGE_DIR。
+SCAN_ON_STARTUP = True
+SCAN_INTERVAL_MINUTES = 30
+SCAN_EXCLUDE_PATTERNS = ["private/**"]
+
 # 离线中文城市名索引，用于根据照片 GPS 信息补充城市名。
 WORLD_CITIES_CSV = "./data/world_cities_zh.csv"
 CITY_GRID_DEG = 1.0

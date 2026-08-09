@@ -96,6 +96,17 @@ def _ensure_photo_tables(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "photos", "current_analysis_version_id", "INTEGER")
     _ensure_column(conn, "photos", "archived_at", "TEXT")
     _ensure_column(conn, "photos", "excluded_at", "TEXT")
+    _ensure_column(conn, "photos", "filename", "TEXT")
+    _ensure_column(conn, "photos", "relative_directory", "TEXT")
+    _ensure_column(conn, "photos", "file_extension", "TEXT")
+    _ensure_column(conn, "photos", "media_type", "TEXT")
+    _ensure_column(conn, "photos", "width", "INTEGER")
+    _ensure_column(conn, "photos", "height", "INTEGER")
+    _ensure_column(conn, "photos", "captured_at", "TEXT")
+    _ensure_column(conn, "photos", "gps_lat", "REAL")
+    _ensure_column(conn, "photos", "gps_lon", "REAL")
+    _ensure_column(conn, "photos", "gps_alt", "REAL")
+    _ensure_column(conn, "photos", "unreadable_reason", "TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS photo_overrides (
@@ -220,6 +231,33 @@ def _ensure_analysis_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_scan_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          status TEXT NOT NULL,
+          root_path TEXT NOT NULL,
+          trigger_sources_json TEXT NOT NULL DEFAULT '[]',
+          discovered_count INTEGER NOT NULL DEFAULT 0,
+          readable_count INTEGER NOT NULL DEFAULT 0,
+          unreadable_count INTEGER NOT NULL DEFAULT 0,
+          missing_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT,
+          error_message TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_tasks_one_active
+        ON scan_tasks((1)) WHERE status IN ('queued', 'running')
+        """
+    )
+
+
 def _ensure_model_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -278,6 +316,7 @@ def _ensure_notification_tables(conn: sqlite3.Connection) -> None:
 def _ensure_tables(conn: sqlite3.Connection) -> None:
     _ensure_photo_tables(conn)
     _ensure_analysis_tables(conn)
+    _ensure_scan_tables(conn)
     _ensure_model_tables(conn)
     _ensure_notification_tables(conn)
 

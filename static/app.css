@@ -483,6 +483,79 @@ h3 {
   padding: 14px;
 }
 
+.action-dock form {
+  display: contents;
+}
+
+.library-filters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+  gap: 12px;
+  padding: 18px 0;
+}
+
+.library-filters label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.library-filters input,
+.library-filters select {
+  min-width: 0;
+  height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 0 10px;
+}
+
+.asset-table-wrap {
+  overflow-x: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.asset-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.asset-table th,
+.asset-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.asset-table td:nth-child(2) {
+  white-space: normal;
+  min-width: 220px;
+}
+
+.asset-table td small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.asset-thumb {
+  width: 72px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--soft);
+}
+
+@media (max-width: 1100px) {
+  .library-filters {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+  }
+}
+
 .dock-action {
   justify-content: flex-start;
   text-align: left;

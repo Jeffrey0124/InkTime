@@ -396,3 +396,168 @@ def _hydrate_missing_locations(photos: list[dict[str, Any]]) -> None:
 def load_photo(db_path: Path, photo_id: int) -> dict[str, Any] | None:
     photos = load_photos(db_path, limit=1, include_missing=True, photo_id=photo_id)
     return photos[0] if photos else None
+
+
+def load_library_assets(
+    db_path: Path,
+    *,
+    file_status: str = "",
+    analysis_status: str = "",
+    captured_from: str = "",
+    captured_to: str = "",
+    has_gps: bool | None = None,
+    file_type: str = "",
+    photo_type: str = "",
+    directory: str = "",
+    filename: str = "",
+    sort: str = "created_at",
+    order: str = "desc",
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Return the administrator asset inventory without exposing absolute paths."""
+
+    allowed_sorts = {
+        "captured_at": "p.captured_at",
+        "created_at": "p.created_at",
+        "filename": "p.filename COLLATE NOCASE",
+        "size": "p.size_bytes",
+    }
+    sort_expression = allowed_sorts.get(sort, allowed_sorts["created_at"])
+    direction = "ASC" if str(order).lower() == "asc" else "DESC"
+    safe_limit = max(1, min(int(limit or 200), 500))
+    safe_offset = max(0, int(offset or 0))
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _table_exists(conn, "photos"):
+            return {
+                "items": [],
+                "filtered_total": 0,
+                "summary": {"total": 0, "analyzable": 0, "file_status": {}, "analysis_status": {}},
+            }
+        summary = {
+            "total": int(conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]),
+            "analyzable": int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM photos
+                    WHERE file_status='present' AND exists_on_disk=1
+                      AND visibility_status='active'
+                    """
+                ).fetchone()[0]
+            ),
+            "file_status": {
+                str(row[0]): int(row[1])
+                for row in conn.execute(
+                    "SELECT file_status, COUNT(*) FROM photos GROUP BY file_status"
+                )
+            },
+            "analysis_status": {
+                str(row[0]): int(row[1])
+                for row in conn.execute(
+                    "SELECT analysis_status, COUNT(*) FROM photos GROUP BY analysis_status"
+                )
+            },
+        }
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if file_status:
+            clauses.append("p.file_status = ?")
+            params.append(file_status)
+        if analysis_status:
+            clauses.append("p.analysis_status = ?")
+            params.append(analysis_status)
+        if captured_from:
+            clauses.append("p.captured_at >= ?")
+            params.append(captured_from)
+        if captured_to:
+            clauses.append("p.captured_at < date(?, '+1 day')")
+            params.append(captured_to)
+        if has_gps is True:
+            clauses.append("p.gps_lat IS NOT NULL AND p.gps_lon IS NOT NULL")
+        elif has_gps is False:
+            clauses.append("(p.gps_lat IS NULL OR p.gps_lon IS NULL)")
+        if file_type:
+            normalized_type = file_type.strip().lower().lstrip(".")
+            clauses.append(
+                "(LOWER(LTRIM(p.file_extension, '.')) = ? OR LOWER(p.media_type) = ?)"
+            )
+            params.extend([normalized_type, normalized_type])
+        if photo_type:
+            clauses.append("COALESCE(av.photo_type, '') = ?")
+            params.append(photo_type)
+        if directory:
+            clauses.append("p.relative_directory LIKE ?")
+            params.append(f"%{directory}%")
+        if filename:
+            clauses.append("p.filename LIKE ?")
+            params.append(f"%{filename}%")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        base = f"""
+            FROM photos p
+            LEFT JOIN analysis_versions av ON av.id = p.current_analysis_version_id
+            {where}
+        """
+        filtered_total = int(
+            conn.execute(f"SELECT COUNT(*) {base}", params).fetchone()[0]
+        )
+        rows = conn.execute(
+            f"""
+            SELECT p.id, p.filename, p.relative_directory, p.file_extension,
+                   p.media_type, p.size_bytes, p.width, p.height, p.file_status,
+                   p.analysis_status, p.captured_at, p.gps_lat, p.gps_lon,
+                   p.created_at, COALESCE(av.photo_type, '') AS photo_type
+            {base}
+            ORDER BY {sort_expression} {direction}, p.id {direction}
+            LIMIT ? OFFSET ?
+            """,
+            params + [safe_limit, safe_offset],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return {
+        "items": [
+            {
+                "photo_id": int(row["id"]),
+                "filename": row["filename"] or "",
+                "directory": row["relative_directory"] or "",
+                "file_extension": row["file_extension"] or "",
+                "media_type": row["media_type"] or "",
+                "size_bytes": int(row["size_bytes"] or 0),
+                "width": row["width"],
+                "height": row["height"],
+                "file_status": row["file_status"],
+                "analysis_status": row["analysis_status"],
+                "captured_at": row["captured_at"] or "",
+                "has_gps": row["gps_lat"] is not None and row["gps_lon"] is not None,
+                "type": row["photo_type"] or "",
+                "created_at": row["created_at"],
+                "preview_url": f"/media/previews/{int(row['id'])}.jpg",
+            }
+            for row in rows
+        ],
+        "filtered_total": filtered_total,
+        "summary": summary,
+    }
+
+
+def load_library_source(db_path: Path, photo_id: int) -> Path | None:
+    """Resolve an asset path for internal preview serving only."""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        if not _table_exists(conn, "photos"):
+            return None
+        row = conn.execute(
+            "SELECT path FROM photos WHERE id=? AND exists_on_disk=1", (photo_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    source = Path(str(row[0])).expanduser()
+    return source if source.is_file() else None

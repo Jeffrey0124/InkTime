@@ -165,6 +165,18 @@ python -m flask reset-admin-password
 
 不要把初始密码、会话密钥或重置后的密码提交到 Git。
 
+## 素材库扫描
+
+WebUI 启动扫描、周期扫描和“重新扫描”按钮共用一个活动任务。扫描只维护素材、文件状态和 EXIF 元数据，不创建 AI 任务，也不会删除历史分析。
+
+```env
+SCAN_ON_STARTUP=true
+SCAN_INTERVAL_MINUTES=30
+SCAN_EXCLUDE_PATTERNS=private/**,exports/**
+```
+
+管理员登录后访问 `/library`，可以按文件/分析状态、拍摄日期、GPS、类型、目录和文件名筛选，并按拍摄日期、入库时间、文件名或文件大小双向排序。
+
 ## 飞牛 NAS Docker 部署
 
 推荐使用 Docker Compose 的双容器形态：
