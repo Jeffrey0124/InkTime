@@ -56,6 +56,12 @@ class AnalysisTaskRouteTests(unittest.TestCase):
             selection = preview.get_json()["selection"]
             self.assertEqual(selection["selected_count"], 1)
 
+            invalid = client.post(
+                "/api/library/selection-preview",
+                json={"selection": {"kind": "manual", "photo_ids": ["bad"]}},
+            )
+            self.assertEqual(invalid.status_code, 400)
+
             created = client.post(
                 "/api/analysis-tasks",
                 json={

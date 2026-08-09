@@ -37,6 +37,22 @@ def _positive_int(value: Any, default: int) -> int:
         return default
 
 
+def _task_type(value: Any) -> str:
+    task_type = str(value or "incremental")
+    if task_type not in {"incremental", "reanalysis"}:
+        raise AnalysisTaskError("分析模式无效")
+    return task_type
+
+
+def _photo_ids(values: Any) -> list[int]:
+    if not isinstance(values, (list, tuple)):
+        raise AnalysisTaskError("素材 ID 格式无效")
+    try:
+        return list(dict.fromkeys(int(value) for value in values))
+    except (TypeError, ValueError) as exc:
+        raise AnalysisTaskError("素材 ID 格式无效") from exc
+
+
 class AnalysisTaskService:
     def __init__(self, db_path: str | Path, settings_store: SettingsStore) -> None:
         self.db_path = Path(db_path)
@@ -88,6 +104,15 @@ class AnalysisTaskService:
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _release_finished_occupancy(conn: sqlite3.Connection) -> None:
+        placeholders = ",".join("?" for _ in UNFINISHED_TASK_STATUSES)
+        conn.execute(
+            "DELETE FROM analysis_task_occupancy WHERE task_id NOT IN "
+            f"(SELECT id FROM analysis_tasks WHERE status IN ({placeholders}))",
+            UNFINISHED_TASK_STATUSES,
+        )
 
     @staticmethod
     def _filter_sql(filters: dict[str, Any]) -> tuple[list[str], list[Any]]:
@@ -151,12 +176,16 @@ class AnalysisTaskService:
         filters = dict(selection.get("filters") or {})
         clauses, params = self._filter_sql(filters)
         manual_ids: list[int] = []
-        if kind == "manual":
-            manual_ids = list(dict.fromkeys(int(value) for value in selection.get("photo_ids") or []))
-            if not manual_ids:
-                return []
+        frozen_ids = selection.get("frozen_photo_ids")
+        if frozen_ids is not None:
+            manual_ids = _photo_ids(frozen_ids)
+        elif kind == "manual":
+            manual_ids = _photo_ids(selection.get("photo_ids") or [])
+        if manual_ids:
             clauses.append(f"p.id IN ({','.join('?' for _ in manual_ids)})")
             params.extend(manual_ids)
+        elif frozen_ids is not None or kind == "manual":
+            return []
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         rows = conn.execute(
             f"""
@@ -170,7 +199,7 @@ class AnalysisTaskService:
             """,
             params,
         ).fetchall()
-        if kind == "manual":
+        if manual_ids:
             positions = {photo_id: index for index, photo_id in enumerate(manual_ids)}
             return sorted(rows, key=lambda row: positions[int(row["id"])])
         sort = str(selection.get("sort") or "created_at")
@@ -194,9 +223,7 @@ class AnalysisTaskService:
         return dict(self.settings_store.get_section("analysis_defaults").get("value") or {})
 
     def preview_selection(self, payload: dict[str, Any]) -> dict[str, Any]:
-        task_type = str(payload.get("task_type") or "incremental")
-        if task_type not in {"incremental", "reanalysis"}:
-            raise AnalysisTaskError("分析模式无效")
+        task_type = _task_type(payload.get("task_type"))
         selection = dict(payload.get("selection") or {})
         kind = str(selection.get("kind") or "manual")
         if kind not in {"manual", "all", "top_n"}:
@@ -212,7 +239,9 @@ class AnalysisTaskService:
 
         conn = self._connect()
         try:
+            self._release_finished_occupancy(conn)
             rows = self._candidate_rows(conn, selection)
+            conn.commit()
         finally:
             conn.close()
         eligible: list[int] = []
@@ -236,6 +265,7 @@ class AnalysisTaskService:
             "excluded_count": sum(reasons.values()),
             "excluded_reasons": reasons,
             "photo_ids": eligible,
+            "frozen_photo_ids": [int(row["id"]) for row in rows],
             "seed": selection.get("seed"),
             "concurrency": min(4, _positive_int(defaults.get("concurrency"), 1)),
             "max_request_rounds": min(2, _positive_int(defaults.get("max_request_rounds"), 2)),
@@ -270,11 +300,43 @@ class AnalysisTaskService:
             "max_request_rounds": min(2, _positive_int(defaults.get("max_request_rounds"), 2)),
         }
 
+    @staticmethod
+    def _confirmed_strategy(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or not isinstance(value.get("execution_levels"), list):
+            return None
+        levels = []
+        for item in value["execution_levels"]:
+            if not isinstance(item, dict):
+                raise AnalysisTaskError("模型策略快照无效")
+            channel_id = str(item.get("channel_id") or "").strip()
+            channel_name = str(item.get("channel_name") or "").strip()
+            model_id = str(item.get("model_id") or "").strip()
+            try:
+                channel_version = int(item.get("channel_version"))
+            except (TypeError, ValueError) as exc:
+                raise AnalysisTaskError("模型策略快照无效") from exc
+            if not channel_id or not channel_name or not model_id or channel_version < 1:
+                raise AnalysisTaskError("模型策略快照无效")
+            levels.append(
+                {
+                    "channel_id": channel_id,
+                    "channel_name": channel_name,
+                    "channel_version": channel_version,
+                    "model_id": model_id,
+                }
+            )
+        if not levels:
+            raise AnalysisTaskError("模型策略快照无效")
+        return {
+            "execution_levels": levels,
+            "max_request_rounds": min(
+                2, _positive_int(value.get("max_request_rounds"), 2)
+            ),
+        }
+
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-        task_type = str(payload.get("task_type") or "incremental")
-        if task_type not in {"incremental", "reanalysis"}:
-            raise AnalysisTaskError("分析模式无效")
-        photo_ids = list(dict.fromkeys(int(value) for value in payload.get("photo_ids") or []))
+        task_type = _task_type(payload.get("task_type"))
+        photo_ids = _photo_ids(payload.get("photo_ids") or [])
         if not photo_ids:
             raise AnalysisTaskError("没有可加入任务的素材")
         concurrency = _positive_int(payload.get("concurrency"), 1)
@@ -286,7 +348,9 @@ class AnalysisTaskService:
             "confirmed_high_cost"
         ):
             raise AnalysisTaskError("该任务需要二次确认", code="high_cost_confirmation_required", status=409)
-        strategy = self._strategy_snapshot()
+        strategy = self._confirmed_strategy(payload.get("strategy_snapshot"))
+        if strategy is None:
+            strategy = self._strategy_snapshot()
         now = _now()
         label = "重新分析" if task_type == "reanalysis" else "增量分析"
         name = str(payload.get("name") or "").strip() or f"{label} {now[:16].replace('T', ' ')}"
@@ -294,6 +358,7 @@ class AnalysisTaskService:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            self._release_finished_occupancy(conn)
             placeholders = ",".join("?" for _ in photo_ids)
             rows = conn.execute(
                 f"""

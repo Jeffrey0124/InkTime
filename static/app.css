@@ -583,7 +583,7 @@ h3 {
   height: 38px;
   padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 10px;
 }
 
 .analysis-task-dialog {
@@ -591,7 +591,7 @@ h3 {
   max-height: calc(100vh - 48px);
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 16px;
   background: transparent;
   color: var(--ink);
 }
@@ -606,7 +606,7 @@ h3 {
   gap: 18px;
   padding: 26px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 16px;
   background: var(--surface);
   box-shadow: var(--deep-shadow);
 }
@@ -636,7 +636,7 @@ h3 {
   flex: 1;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 10px;
   background: var(--page);
 }
 
@@ -655,7 +655,7 @@ h3 {
 .high-cost-confirm {
   padding: 12px;
   border: 1px solid #edcf93;
-  border-radius: 5px;
+  border-radius: 10px;
   background: #fff8e8;
 }
 
@@ -664,7 +664,7 @@ h3 {
   margin-top: 18px;
   padding: 24px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 16px;
   background: var(--surface);
 }
 

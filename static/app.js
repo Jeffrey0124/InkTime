@@ -614,8 +614,13 @@
       if (requestId !== previewRequest) return null;
       preview = data.selection;
       if (updateSelection) {
-        state.photoIds = preview.photo_ids;
-        if (state.selection?.sort === "random") state.selection.seed = preview.seed;
+        if (state.selection?.kind !== "manual") state.photoIds = preview.photo_ids;
+        if (state.selection) {
+          if (state.selection.sort === "random") state.selection.seed = preview.seed;
+          if (state.selection.kind !== "manual") {
+            state.selection.frozen_photo_ids = preview.frozen_photo_ids;
+          }
+        }
         save(); render();
       }
       const levels = preview.execution_levels.map((item) => `${item.channel_name} / ${item.model_id}`).join(" → ");
@@ -679,6 +684,10 @@
             concurrency: Number(form.elements.namedItem("concurrency").value || 1),
             confirmed_high_cost: form.elements.namedItem("confirmed_high_cost").checked,
             photo_ids: preview.photo_ids,
+            strategy_snapshot: {
+              execution_levels: preview.execution_levels,
+              max_request_rounds: preview.max_request_rounds,
+            },
           }),
         });
         state = { photoIds: [], selection: null }; save(); render();

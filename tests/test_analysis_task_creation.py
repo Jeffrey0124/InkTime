@@ -118,6 +118,24 @@ class AnalysisTaskCreationTests(unittest.TestCase):
         self.assertEqual(first["photo_ids"], second["photo_ids"])
         self.assertEqual(first["seed"], "stable-seed")
 
+        frozen_payload = json.loads(json.dumps(payload))
+        frozen_payload["selection"]["frozen_photo_ids"] = first["frozen_photo_ids"]
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """
+            INSERT INTO photos
+            (path, filename, exists_on_disk, status, file_status, analysis_status,
+             visibility_status, created_at, updated_at)
+            VALUES (?, 'later.jpg', 1, 'pending', 'present', 'pending', 'active', ?, ?)
+            """,
+            (str(self.root / "later.jpg"), "2026-03-01", "2026-03-01"),
+        )
+        conn.commit()
+        conn.close()
+        frozen = self.service.preview_selection(frozen_payload)
+        self.assertEqual(frozen["frozen_photo_ids"], first["frozen_photo_ids"])
+        self.assertEqual(frozen["photo_ids"], first["photo_ids"])
+
     def test_creation_freezes_membership_strategy_and_prevents_double_occupation(self):
         preview = self.service.preview_selection(
             {
@@ -172,6 +190,50 @@ class AnalysisTaskCreationTests(unittest.TestCase):
                     "concurrency": 1,
                     "confirmed_high_cost": True,
                 }
+            )
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE analysis_tasks SET status='completed' WHERE id=?", (created["task_id"],))
+        conn.commit()
+        conn.close()
+        released = self.service.preview_selection(
+            {
+                "task_type": "incremental",
+                "selection": {"kind": "manual", "photo_ids": preview["photo_ids"]},
+            }
+        )
+        self.assertEqual(released["photo_ids"], preview["photo_ids"])
+
+    def test_creation_uses_confirmed_strategy_snapshot_and_rejects_invalid_ids(self):
+        preview = self.service.preview_selection(
+            {
+                "task_type": "incremental",
+                "selection": {"kind": "manual", "photo_ids": [1]},
+            }
+        )
+        snapshot = {
+            "execution_levels": [
+                {**preview["execution_levels"][0], "api_key": "must-not-persist"}
+            ],
+            "max_request_rounds": preview["max_request_rounds"],
+        }
+        self.store.save_analysis_defaults({"max_request_rounds": 1})
+        created = self.service.create_task(
+            {
+                "task_type": "incremental",
+                "photo_ids": preview["photo_ids"],
+                "strategy_snapshot": snapshot,
+            }
+        )
+        task = self.service.get_task(created["task_id"])
+        self.assertNotIn("api_key", task["strategy"]["execution_levels"][0])
+        self.assertEqual(
+            task["strategy"]["execution_levels"][0], preview["execution_levels"][0]
+        )
+        self.assertEqual(task["strategy"]["max_request_rounds"], snapshot["max_request_rounds"])
+        with self.assertRaisesRegex(AnalysisTaskError, "素材 ID 格式无效"):
+            self.service.preview_selection(
+                {"selection": {"kind": "manual", "photo_ids": ["bad"]}}
             )
 
     def test_reanalysis_and_large_tasks_require_explicit_confirmation(self):
