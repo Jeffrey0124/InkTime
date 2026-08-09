@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
+import atexit
+import datetime as dt
 import html
 import json
 import os
 import re
-import sqlite3
-import datetime as dt
 import secrets
+import sqlite3
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -22,6 +23,7 @@ from PIL import Image, ImageOps
 
 from photo_identity import ensure_photo_identity_schema
 from model_provider import ModelProviderClient
+from library_scanner import LibraryScanner, PeriodicScanScheduler, ScanCoordinator
 from push_manager import (
     PushSettings,
     ensure_push_schema,
@@ -32,7 +34,13 @@ from push_manager import (
     write_latest_files,
 )
 from render_photopainter import render_from_database
-from web_queries import load_photo, load_photos, load_status
+from web_queries import (
+    load_library_assets,
+    load_library_source,
+    load_photo,
+    load_photos,
+    load_status,
+)
 from web_auth import WebAuth
 from settings_store import MasterKeyUnavailable, SettingsError, SettingsStore
 
@@ -246,6 +254,7 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
     active_gallery = "active" if active == "gallery" else ""
     active_studio = "active" if active == "studio" else ""
     active_settings = "active" if active == "settings" else ""
+    active_library = "active" if active == "library" else ""
     admin_navigation = f"""
         <a class="{active_dashboard}" href="/">
           <span class="nav-icon">⌂</span>
@@ -254,6 +263,10 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
         <a class="{active_studio}" href="/push-studio">
           <span class="nav-icon">□</span>
           <span>推送工作台</span>
+        </a>
+        <a class="{active_library}" href="/library">
+          <span class="nav-icon">▤</span>
+          <span>素材库</span>
         </a>
         <a class="{active_settings}" href="/settings">
           <span class="nav-icon">◌</span>
@@ -634,7 +647,10 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
       <section class="dashboard-grid">
         <div class="action-dock" aria-label="快捷操作">
           <button class="dock-action primary" type="button" disabled title="分析任务控制将在后续阶段接入">开始 / 暂停分析</button>
-          <button class="dock-action" type="button" disabled title="照片库扫描任务将在后续阶段接入">重新扫描照片库</button>
+          <form method="post" action="/api/library/scan">
+            <input type="hidden" name="csrf_token" value="{_esc(session.get('csrf_token') or '')}">
+            <button class="dock-action" type="submit">重新扫描照片库</button>
+          </form>
           <button class="dock-action" type="button" disabled title="分析任务控制将在后续阶段接入">停止分析</button>
           <a class="dock-action" href="/gallery">进入画廊</a>
           <a class="dock-action" href="/settings">模型设置</a>
@@ -667,6 +683,61 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
           </ol>
         </article>
       </section>
+    </section>
+    """
+
+
+def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> str:
+    summary = payload["summary"]
+    def selected(name: str, value: str) -> str:
+        return " selected" if filters.get(name, "") == value else ""
+
+    rows = []
+    for item in payload["items"]:
+        rows.append(
+            f"""
+            <tr>
+              <td><img class="asset-thumb" src="{_esc(item['preview_url'])}" alt=""></td>
+              <td><strong>{_esc(item['filename'])}</strong><small>{_esc(item['directory'] or '根目录')}</small></td>
+              <td><span class="state-label">{_esc(item['file_status'])}</span></td>
+              <td>{_esc(item['analysis_status'])}</td>
+              <td>{_esc(item['captured_at'] or '-')}</td>
+              <td>{'有' if item['has_gps'] else '无'}</td>
+              <td>{_esc(item['type'] or '-')}</td>
+              <td>{_esc(item['size_bytes'])}</td>
+            </tr>
+            """
+        )
+    body = "".join(rows) or '<tr><td colspan="8" class="empty">当前筛选没有素材。</td></tr>'
+    return f"""
+    <section class="screen library-screen" aria-labelledby="library-title">
+      <div class="section-heading">
+        <div><p class="kicker">Asset Library</p><h2 id="library-title">素材库</h2></div>
+        <form method="post" action="/api/library/scan">
+          <input type="hidden" name="csrf_token" value="{_esc(session.get('csrf_token') or '')}">
+          <button class="primary-button" type="submit">重新扫描</button>
+        </form>
+      </div>
+      <div class="metric-grid library-metrics">
+        <article class="metric-tile"><span>全部素材</span><strong>{_esc(str(summary['total']))}</strong></article>
+        <article class="metric-tile"><span>可分析</span><strong>{_esc(str(summary['analyzable']))}</strong></article>
+        <article class="metric-tile"><span>当前结果</span><strong>{_esc(str(payload['filtered_total']))}</strong></article>
+      </div>
+      <form class="library-filters" method="get">
+        <label>文件状态<select name="file_status"><option value="">全部</option><option value="present"{selected('file_status', 'present')}>可读</option><option value="unreadable"{selected('file_status', 'unreadable')}>不可读</option><option value="missing"{selected('file_status', 'missing')}>缺失</option></select></label>
+        <label>分析状态<select name="analysis_status"><option value="">全部</option><option value="pending"{selected('analysis_status', 'pending')}>未分析</option><option value="analyzed"{selected('analysis_status', 'analyzed')}>已分析</option></select></label>
+        <label>拍摄日期从<input type="date" name="captured_from" value="{_esc(filters.get('captured_from'))}"></label>
+        <label>至<input type="date" name="captured_to" value="{_esc(filters.get('captured_to'))}"></label>
+        <label>GPS<select name="has_gps"><option value="">全部</option><option value="1"{selected('has_gps', '1')}>有 GPS</option><option value="0"{selected('has_gps', '0')}>无 GPS</option></select></label>
+        <label>文件类型<select name="file_type"><option value="">全部</option><option value="jpg"{selected('file_type', 'jpg')}>JPG</option><option value="jpeg"{selected('file_type', 'jpeg')}>JPEG</option><option value="png"{selected('file_type', 'png')}>PNG</option><option value="webp"{selected('file_type', 'webp')}>WebP</option><option value="heic"{selected('file_type', 'heic')}>HEIC</option><option value="heif"{selected('file_type', 'heif')}>HEIF</option></select></label>
+        <label>AI 类型<input name="type" value="{_esc(filters.get('type'))}"></label>
+        <label>目录<input name="directory" value="{_esc(filters.get('directory'))}"></label>
+        <label>文件名<input name="filename" value="{_esc(filters.get('filename'))}"></label>
+        <label>排序<select name="sort"><option value="created_at"{selected('sort', 'created_at')}>入库时间</option><option value="captured_at"{selected('sort', 'captured_at')}>拍摄日期</option><option value="filename"{selected('sort', 'filename')}>文件名</option><option value="size"{selected('sort', 'size')}>文件大小</option></select></label>
+        <label>方向<select name="order"><option value="desc"{selected('order', 'desc')}>新到旧 / 大到小</option><option value="asc"{selected('order', 'asc')}>旧到新 / 小到大</option></select></label>
+        <button class="ghost-button" type="submit">应用筛选</button>
+      </form>
+      <div class="asset-table-wrap"><table class="asset-table"><thead><tr><th>预览</th><th>文件</th><th>文件状态</th><th>分析状态</th><th>拍摄日期</th><th>GPS</th><th>AI 类型</th><th>大小</th></tr></thead><tbody>{body}</tbody></table></div>
     </section>
     """
 
@@ -1115,6 +1186,9 @@ def create_app(
     auth_now=None,
     settings_master_key: str | None = None,
     model_provider=None,
+    scan_root: str | Path | None = None,
+    scan_startup: bool | None = None,
+    scan_interval_minutes: float | None = None,
 ) -> Flask:
     app = Flask(__name__)
     auth_enabled = True if auth_required is None else bool(auth_required)
@@ -1167,6 +1241,33 @@ def create_app(
     )
     app.extensions["web_auth"] = auth
     app.extensions["settings_store"] = settings_store
+    library_root = _resolve_path(scan_root or _config_value("IMAGE_DIR", "./sample_photos"))
+    scanner = LibraryScanner(
+        db,
+        library_root,
+        exclude_patterns=list(_config_value("SCAN_EXCLUDE_PATTERNS", []) or []),
+    )
+    scan_coordinator = ScanCoordinator(scanner)
+    app.extensions["scan_coordinator"] = scan_coordinator
+    atexit.register(scan_coordinator.shutdown)
+
+    should_scan_startup = (
+        bool(_config_value("SCAN_ON_STARTUP", False)) and db_path is None
+        if scan_startup is None
+        else bool(scan_startup)
+    )
+    scan_interval = (
+        float(_config_value("SCAN_INTERVAL_MINUTES", 0) or 0)
+        if scan_interval_minutes is None
+        else max(0.0, float(scan_interval_minutes))
+    )
+    if should_scan_startup:
+        scan_coordinator.start("startup")
+    if scan_interval > 0 and (db_path is None or scan_interval_minutes is not None):
+        scan_scheduler = PeriodicScanScheduler(scan_coordinator, scan_interval)
+        scan_scheduler.start()
+        app.extensions["scan_scheduler"] = scan_scheduler
+        atexit.register(lambda: scan_scheduler.shutdown(wait=False))
 
     def push_token_error():
         token = str(_config_value("PUSH_API_TOKEN", "") or "")
@@ -1185,6 +1286,13 @@ def create_app(
         if isinstance(recent_push, dict):
             recent_push.pop("source_path", None)
             recent_push.pop("render_path", None)
+        library_summary = load_library_assets(db, limit=1)["summary"]
+        status["tracked_photos"] = library_summary["total"]
+        status["monitored_files"] = library_summary["analyzable"]
+        status["analyzed_photos"] = library_summary["analysis_status"].get("analyzed", 0)
+        status["missing_photos"] = library_summary["file_status"].get("missing", 0)
+        status["unreadable_photos"] = library_summary["file_status"].get("unreadable", 0)
+        status["unanalyzed_estimate"] = library_summary["analysis_status"].get("pending", 0)
         return status
 
     public_endpoints = {
@@ -1365,6 +1473,55 @@ def create_app(
     def api_status():
         return jsonify(web_status())
 
+    def library_query() -> tuple[dict[str, Any], dict[str, str]]:
+        values = {key: str(request.args.get(key, "") or "") for key in (
+            "file_status", "analysis_status", "captured_from", "captured_to",
+            "has_gps", "file_type", "type", "directory", "filename", "sort", "order",
+        )}
+        gps = None if values["has_gps"] == "" else values["has_gps"] in {"1", "true", "yes"}
+        payload = load_library_assets(
+            db,
+            file_status=values["file_status"],
+            analysis_status=values["analysis_status"],
+            captured_from=values["captured_from"],
+            captured_to=values["captured_to"],
+            has_gps=gps,
+            file_type=values["file_type"],
+            photo_type=values["type"],
+            directory=values["directory"],
+            filename=values["filename"],
+            sort=values["sort"] or "created_at",
+            order=values["order"] or "desc",
+            limit=min(500, max(1, int(request.args.get("limit", 200)))),
+            offset=max(0, int(request.args.get("offset", 0))),
+        )
+        return payload, values
+
+    @app.get("/library")
+    def library():
+        payload, filters = library_query()
+        return _page("InkTime 素材库", _render_library_page(payload, filters), active="library")
+
+    @app.get("/api/library")
+    def api_library():
+        payload, _ = library_query()
+        return jsonify({"ok": True, **payload})
+
+    @app.post("/api/library/scan")
+    def api_library_scan():
+        started = scan_coordinator.start("manual")
+        response = {"ok": True, "task_id": started.task_id, "reused": started.reused}
+        if request.accept_mimetypes.accept_html and not request.is_json:
+            return redirect("/library")
+        return jsonify(response), 200 if started.reused else 202
+
+    @app.get("/api/library/scans/<int:task_id>")
+    def api_library_scan_status(task_id: int):
+        task = scan_coordinator.task(task_id)
+        if task is None:
+            abort(404)
+        return jsonify({"ok": True, "task": task})
+
     @app.get("/gallery")
     def gallery():
         sort = str(request.args.get("sort", "score"))
@@ -1425,9 +1582,13 @@ def create_app(
     @app.get("/media/previews/<int:photo_id>.jpg")
     def photo_preview(photo_id: int):
         photo = load_photo(db, photo_id)
-        if photo is None or not photo.get("exists_on_disk"):
+        source = (
+            Path(str(photo.get("path") or "")).expanduser()
+            if photo is not None and photo.get("exists_on_disk")
+            else load_library_source(db, photo_id) if g.is_admin else None
+        )
+        if source is None:
             abort(404)
-        source = Path(str(photo.get("path") or "")).expanduser()
         if not source.is_file():
             abort(404)
         try:

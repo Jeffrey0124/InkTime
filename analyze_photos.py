@@ -1618,65 +1618,9 @@ def main():
     ensure_table(conn)
     city_resolver = get_city_resolver()
 
-    # =======================
-    # 同步删除：NAS/磁盘上已不存在的文件，也从数据库里删除
-    # 只处理当前 IMAGE_DIR 前缀下的记录，避免误删其它历史路径。
-    # =======================
     image_dir_prefix = str(IMAGE_DIR)
-
-    try:
-        # 用临时表避免 IN (...) 过长导致的 SQLite 参数上限问题
-        conn.execute("DROP TABLE IF EXISTS _temp_existing_paths")
-        conn.execute("CREATE TEMP TABLE _temp_existing_paths (path TEXT PRIMARY KEY)")
-
-        # 批量插入当前扫描到的文件列表
-        CHUNK = 2000
-        total_files = len(imgs)
-        inserted = 0
-        for i in range(0, total_files, CHUNK):
-            chunk = imgs[i : i + CHUNK]
-            conn.executemany(
-                "INSERT OR IGNORE INTO _temp_existing_paths(path) VALUES (?)",
-                [(str(p),) for p in chunk],
-            )
-            inserted += len(chunk)
-            if inserted % 10000 == 0:
-                print(f"[CLEAN] 已写入存在文件清单：{inserted}/{total_files} …")
-
-        # 删除：数据库里有记录，但磁盘上已不存在的文件
-        cur_clean = conn.cursor()
-        before_cnt = cur_clean.execute(
-            "SELECT COUNT(*) FROM photo_scores WHERE path LIKE ?",
-            (image_dir_prefix + "%",),
-        ).fetchone()[0]
-
-        cur_clean.execute(
-            """
-            DELETE FROM photo_scores
-            WHERE path LIKE ?
-              AND NOT EXISTS (
-                    SELECT 1 FROM _temp_existing_paths t
-                    WHERE t.path = photo_scores.path
-              )
-            """,
-            (image_dir_prefix + "%",),
-        )
-        deleted = cur_clean.rowcount if cur_clean.rowcount is not None else 0
-        conn.commit()
-
-        after_cnt = cur_clean.execute(
-            "SELECT COUNT(*) FROM photo_scores WHERE path LIKE ?",
-            (image_dir_prefix + "%",),
-        ).fetchone()[0]
-
-        if deleted > 0:
-            print(f"[CLEAN] 已同步删除 {deleted} 条数据库残留记录（当前目录：{before_cnt} → {after_cnt}）。")
-        else:
-            print("[CLEAN] 数据库与磁盘文件一致，无需清理。")
-
-    except Exception as e:
-        # 清理失败不应影响主流程
-        print(f"[WARN] 同步清理数据库残留记录失败（已忽略，不影响主流程）：{e}")
+    # 素材发现与缺失标记由独立素材扫描任务负责。分析流程不删除历史记录，
+    # 也不修改扫描任务状态，确保扫描与 AI 分析可以并行运行。
 
     try:
         location_updates = backfill_existing_location_metadata(conn, city_resolver)
