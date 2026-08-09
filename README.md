@@ -177,13 +177,15 @@ SCAN_EXCLUDE_PATTERNS=private/**,exports/**
 
 管理员登录后访问 `/library`，可以按文件/分析状态、拍摄日期、GPS、类型、目录和文件名筛选，并按拍摄日期、入库时间、文件名或文件大小双向排序。
 
+WebUI 默认在后台自动领取分析任务；可通过 `ANALYSIS_WORKER_ENABLED=false` 关闭。需要独立调试时可运行 `python analysis_worker.py`，只消费一个任务则使用 `python analysis_worker.py --once`。
+
 ## 飞牛 NAS Docker 部署
 
 推荐使用 Docker Compose 的双容器形态：
 
 - `web`：运行 `python server.py`，提供 WebUI 和 `/push/latest.bmp`。
 - `scheduler`：运行 `python scheduler.py`，负责定时自动推送。
-- `worker`：不常驻，只用于按需执行分析、渲染和单次推送测试。
+- `worker`：不常驻，用于消费分析任务、批量渲染和单次推送测试。
 
 快速命令：
 
@@ -203,7 +205,7 @@ NAS 容器内不能用 `127.0.0.1` 访问你电脑上的 LM Studio。本地模�
 ## 测试
 
 ```powershell
-python -m py_compile analyze_photos.py photopainter_renderer.py render_photopainter.py push_manager.py server.py
+python -m py_compile analyze_photos.py analysis_worker.py photopainter_renderer.py render_photopainter.py push_manager.py server.py
 python -m unittest discover -v
 python -c "import flask, PIL, pillow_heif, numpy; print('ok')"
 python scripts/validate_webui.py --base-url http://127.0.0.1:8766

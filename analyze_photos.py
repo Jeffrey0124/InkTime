@@ -18,6 +18,7 @@ import pillow_heif
 pillow_heif.register_heif_opener()
 import config as cfg
 import shutil
+from photo_scores_schema import ensure_photo_scores_schema
 
 
 # =======================
@@ -176,6 +177,7 @@ API_CHANNELS: list[dict] = list(_runtime_settings["channels"])
 _channel_cooldown_until: list[float] = [0.0] * len(API_CHANNELS)
 _channel_inflight: list[int] = [0] * len(API_CHANNELS)
 _channel_lock = threading.Lock()
+_runtime_channel_override_lock = threading.Lock()
 
 # 每次处理多少张；None 为不限制
 BATCH_LIMIT = _runtime_settings["defaults"].get("batch_size")
@@ -280,125 +282,7 @@ def encode_image_to_b64(path: Path) -> str:
 
 
 def ensure_table(conn: sqlite3.Connection) -> None:
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS photo_scores (
-            path              TEXT PRIMARY KEY,
-            caption           TEXT,
-            type              TEXT,
-            memory_score      REAL,
-            beauty_score      REAL,
-            reason            TEXT,
-            width             INTEGER,
-            height            INTEGER,
-            orientation       TEXT,
-            used_at           TEXT,
-            exif_json         TEXT,
-            raw_json          TEXT,
-            exif_datetime     TEXT,
-            exif_make         TEXT,
-            exif_model        TEXT,
-            exif_iso          INTEGER,
-            exif_exposure_time REAL,
-            exif_f_number     REAL,
-            exif_focal_length REAL,
-            exif_gps_lat      REAL,
-            exif_gps_lon      REAL,
-            exif_gps_alt      REAL,
-            side_caption      TEXT,
-            exif_city         TEXT,
-            location_hint     TEXT,
-            analysis_channel  TEXT,
-            analysis_model    TEXT,
-            crop_focus_json   TEXT
-        )
-        """
-    )
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_json TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN width INTEGER")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN height INTEGER")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN orientation TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN used_at TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_datetime TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_make TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_model TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_iso INTEGER")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_exposure_time REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_f_number REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_focal_length REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_gps_lat REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_gps_lon REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_gps_alt REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN side_caption TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_city TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN location_hint TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN analysis_channel TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN analysis_model TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE photo_scores ADD COLUMN crop_focus_json TEXT")
-    except sqlite3.OperationalError:
-        pass
+    ensure_photo_scores_schema(conn)
     conn.commit()
 
 _SIDE_CAPTION_BLOCKLIST = (
@@ -1494,6 +1378,39 @@ def _process_one_photo(path: Path, city_resolver) -> dict | None:
         "analysis_model": channel_meta.get("analysis_model", ""),
         "cost": t_photo_end - t_photo_start,
     }
+
+
+def process_one_photo(
+    path: Path,
+    city_resolver,
+    *,
+    runtime_channel: dict | None = None,
+) -> dict | None:
+    """Analyze one photo, optionally using exactly one frozen runtime channel."""
+    if runtime_channel is None:
+        return _process_one_photo(path, city_resolver)
+
+    global API_CHANNELS, TIMEOUT, _channel_cooldown_until, _channel_inflight
+    with _runtime_channel_override_lock:
+        previous = (
+            API_CHANNELS,
+            TIMEOUT,
+            _channel_cooldown_until,
+            _channel_inflight,
+        )
+        API_CHANNELS = [dict(runtime_channel)]
+        TIMEOUT = float(runtime_channel.get("timeout") or previous[1])
+        _channel_cooldown_until = [0.0]
+        _channel_inflight = [0]
+        try:
+            return _process_one_photo(path, city_resolver)
+        finally:
+            (
+                API_CHANNELS,
+                TIMEOUT,
+                _channel_cooldown_until,
+                _channel_inflight,
+            ) = previous
 
 
 def _save_result_to_db(cur, conn, rec: dict):
