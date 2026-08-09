@@ -4,11 +4,13 @@ import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from PIL import Image
 import pillow_heif
 
 from library_scanner import LibraryScanner, ScanCoordinator
+from photo_fingerprint import content_fingerprint
 from photo_identity import ensure_photo_identity_schema
 
 
@@ -82,6 +84,76 @@ class LibraryScannerTests(unittest.TestCase):
                 {Path(path).name: status for path, status in rows},
                 {"original.jpg": "missing", "copy.jpg": "present", "renamed.jpg": "present"},
             )
+
+    def test_existing_excluded_copy_is_not_treated_as_a_missing_move_source(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            private = root / "private"
+            private.mkdir()
+            original = private / "original.jpg"
+            Image.new("RGB", (20, 10), "red").save(original)
+            db_path = root / "photos.db"
+            LibraryScanner(db_path, root).scan(trigger="startup")
+
+            copy = root / "copy.jpg"
+            shutil.copyfile(original, copy)
+            LibraryScanner(
+                db_path, root, exclude_patterns=["private/**"]
+            ).scan(trigger="manual")
+
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT filename, file_status FROM photos ORDER BY filename"
+            ).fetchall()
+            conn.close()
+            self.assertTrue(original.is_file())
+            self.assertEqual(
+                rows, [("copy.jpg", "present"), ("original.jpg", "excluded")]
+            )
+
+    def test_fingerprint_io_failure_does_not_fail_the_whole_scan(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            good = root / "good.jpg"
+            bad = root / "bad.jpg"
+            Image.new("RGB", (20, 10), "green").save(good)
+            Image.new("RGB", (20, 10), "red").save(bad)
+            db_path = root / "photos.db"
+            real_fingerprint = content_fingerprint
+
+            def fingerprint(path):
+                if Path(path).name == "bad.jpg":
+                    raise OSError("temporary read failure")
+                return real_fingerprint(path)
+
+            with patch("library_scanner.content_fingerprint", side_effect=fingerprint):
+                result = LibraryScanner(db_path, root).scan(trigger="manual")
+
+            self.assertEqual(result.readable_count, 1)
+            self.assertEqual(result.unreadable_count, 1)
+            conn = sqlite3.connect(db_path)
+            rows = dict(conn.execute("SELECT filename, file_status FROM photos"))
+            task_status = conn.execute("SELECT status FROM scan_tasks").fetchone()[0]
+            conn.close()
+            self.assertEqual(rows, {"good.jpg": "present", "bad.jpg": "unreadable"})
+            self.assertEqual(task_status, "completed")
+
+    def test_unchanged_file_reuses_existing_fingerprint(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "stable.jpg"
+            Image.new("RGB", (20, 10), "green").save(source)
+            db_path = root / "photos.db"
+            scanner = LibraryScanner(db_path, root)
+            scanner.scan(trigger="startup")
+
+            with patch(
+                "library_scanner.content_fingerprint",
+                side_effect=AssertionError("unchanged file should not be hashed again"),
+            ):
+                result = scanner.scan(trigger="scheduled")
+
+            self.assertEqual(result.readable_count, 1)
 
     def test_excluded_missing_and_unreadable_states_do_not_change_other_statuses(self):
         with TemporaryDirectory() as tmp:

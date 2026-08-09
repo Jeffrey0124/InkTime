@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -90,13 +92,23 @@ class AssetMaintenance:
         target = self._cache_target(photo_id, fingerprint)
         if not target.is_file():
             self.preview_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = None
             try:
+                with tempfile.NamedTemporaryFile(
+                    dir=self.preview_dir,
+                    prefix=f".{photo_id}-{fingerprint}-",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temp_file:
+                    temp_path = Path(temp_file.name)
                 with Image.open(source) as image:
                     display = ImageOps.exif_transpose(image).convert("RGB")
                     display.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-                    display.save(target, format="JPEG", quality=86, optimize=True)
+                    display.save(temp_path, format="JPEG", quality=86, optimize=True)
+                os.replace(temp_path, target)
             except (OSError, ValueError, SyntaxError):
-                target.unlink(missing_ok=True)
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
                 return None
         for stale in self.preview_dir.glob(f"{photo_id}-*.jpg"):
             if stale != target:

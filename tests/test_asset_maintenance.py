@@ -1,7 +1,9 @@
 import sqlite3
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -94,6 +96,47 @@ class AssetMaintenanceTests(unittest.TestCase):
             ai_after = conn.execute("SELECT COUNT(*) FROM analysis_tasks").fetchone()[0]
             conn.close()
             self.assertEqual(ai_before, ai_after)
+
+    def test_preview_cache_is_published_atomically(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "library"
+            library.mkdir()
+            source = library / "memory.jpg"
+            Image.new("RGB", (300, 200), "green").save(source)
+            db_path = root / "photos.db"
+            LibraryScanner(db_path, library).scan(trigger="startup")
+            conn = sqlite3.connect(db_path)
+            photo_id = conn.execute("SELECT id FROM photos").fetchone()[0]
+            conn.close()
+            preview_dir = root / "previews"
+            service = AssetMaintenance(db_path, preview_dir)
+            saved = threading.Event()
+            release = threading.Event()
+            original_save = Image.Image.save
+
+            def slow_save(image, fp, *args, **kwargs):
+                result = original_save(image, fp, *args, **kwargs)
+                saved.set()
+                release.wait(timeout=2)
+                return result
+
+            result = []
+            with patch("asset_maintenance.Image.Image.save", new=slow_save):
+                worker = threading.Thread(
+                    target=lambda: result.append(service.ensure_preview(photo_id))
+                )
+                worker.start()
+                self.assertTrue(saved.wait(timeout=2))
+                self.assertIsNone(service.cached_preview(photo_id))
+                self.assertEqual(list(preview_dir.glob(f"{photo_id}-*.jpg")), [])
+                release.set()
+                worker.join(timeout=2)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(result), 1)
+            self.assertTrue(result[0].is_file())
+            self.assertGreater(result[0].stat().st_size, 0)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,16 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def _is_definitely_missing(path: Path) -> bool:
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _ratio(value: Any) -> float:
     try:
         return float(value)
@@ -181,15 +191,30 @@ class LibraryScanner:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
+            tracked = conn.execute("SELECT * FROM photos").fetchall()
+            by_path = {str(row["path"]): row for row in tracked}
             assets: list[dict[str, Any]] = []
             for path, relative in self._files() or ():
                 discovered += 1
                 absolute = str(path.resolve())
                 seen.add(absolute)
-                stat = path.stat()
-                fingerprint = content_fingerprint(path)
+                stat = None
+                fingerprint = None
                 reason = None
                 try:
+                    stat = path.stat()
+                    existing = by_path.get(absolute)
+                    unchanged = (
+                        existing is not None
+                        and existing["file_hash"]
+                        and int(existing["size_bytes"] or -1) == stat.st_size
+                        and float(existing["mtime"] or -1) == stat.st_mtime
+                    )
+                    fingerprint = (
+                        str(existing["file_hash"])
+                        if unchanged
+                        else content_fingerprint(path)
+                    )
                     metadata = _extract_metadata(path)
                     file_status = "present"
                     readable += 1
@@ -209,8 +234,8 @@ class LibraryScanner:
                 asset = {
                     "path": absolute,
                     "file_hash": fingerprint,
-                    "size_bytes": stat.st_size,
-                    "mtime": stat.st_mtime,
+                    "size_bytes": stat.st_size if stat is not None else None,
+                    "mtime": stat.st_mtime if stat is not None else None,
                     "file_status": file_status,
                     "filename": path.name,
                     "relative_directory": (
@@ -231,11 +256,9 @@ class LibraryScanner:
                 }
                 assets.append(asset)
 
-            tracked = conn.execute("SELECT * FROM photos").fetchall()
-            by_path = {str(row["path"]): row for row in tracked}
             new_by_hash: dict[str, list[dict[str, Any]]] = {}
             for asset in assets:
-                if asset["path"] not in by_path:
+                if asset["path"] not in by_path and asset["file_hash"]:
                     new_by_hash.setdefault(str(asset["file_hash"]), []).append(asset)
             tracked_by_hash: dict[str, list[sqlite3.Row]] = {}
             for row in tracked:
@@ -244,7 +267,15 @@ class LibraryScanner:
 
             for fingerprint, new_assets in new_by_hash.items():
                 old_assets = tracked_by_hash.get(fingerprint, [])
-                missing_old = [row for row in old_assets if str(row["path"]) not in seen]
+                missing_old = []
+                for row in old_assets:
+                    old_path = Path(str(row["path"]))
+                    try:
+                        old_path.relative_to(self.root_path)
+                    except ValueError:
+                        continue
+                    if str(old_path) not in seen and _is_definitely_missing(old_path):
+                        missing_old.append(row)
                 if len(new_assets) != 1 or len(old_assets) != 1 or len(missing_old) != 1:
                     continue
                 old = missing_old[0]
@@ -269,8 +300,9 @@ class LibraryScanner:
                 if existing:
                     conn.execute(
                         """
-                        UPDATE photos SET file_hash=:file_hash, size_bytes=:size_bytes,
-                          mtime=:mtime, exists_on_disk=1, status=:status,
+                        UPDATE photos SET file_hash=COALESCE(:file_hash, file_hash),
+                          size_bytes=COALESCE(:size_bytes, size_bytes),
+                          mtime=COALESCE(:mtime, mtime), exists_on_disk=1, status=:status,
                           file_status=:file_status, filename=:filename,
                           relative_directory=:relative_directory,
                           file_extension=:file_extension, media_type=:media_type,
