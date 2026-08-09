@@ -34,6 +34,22 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(conn, table):
+        return set()
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    if column not in _table_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def _photo_scores_paths(conn: sqlite3.Connection) -> list[str]:
     if not _table_exists(conn, "photo_scores"):
         return []
@@ -64,6 +80,22 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_column(conn, "photos", "file_status", "TEXT NOT NULL DEFAULT 'present'")
+    _ensure_column(
+        conn,
+        "photos",
+        "analysis_status",
+        "TEXT NOT NULL DEFAULT 'analyzed'",
+    )
+    _ensure_column(
+        conn,
+        "photos",
+        "visibility_status",
+        "TEXT NOT NULL DEFAULT 'active'",
+    )
+    _ensure_column(conn, "photos", "current_analysis_version_id", "INTEGER")
+    _ensure_column(conn, "photos", "archived_at", "TEXT")
+    _ensure_column(conn, "photos", "excluded_at", "TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS photo_overrides (
@@ -93,10 +125,202 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS analysis_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          photo_id INTEGER NOT NULL,
+          source_task_item_id INTEGER,
+          version_number INTEGER NOT NULL,
+          caption TEXT,
+          side_caption TEXT,
+          photo_type TEXT,
+          memory_score REAL,
+          beauty_score REAL,
+          reason TEXT,
+          crop_focus_json TEXT,
+          analysis_channel TEXT,
+          analysis_model TEXT,
+          result_json TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE(photo_id, version_number),
+          FOREIGN KEY(photo_id) REFERENCES photos(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS analysis_tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          task_type TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued',
+          queue_position INTEGER,
+          concurrency INTEGER NOT NULL DEFAULT 1,
+          model_strategy_json TEXT NOT NULL DEFAULT '{}',
+          total_count INTEGER NOT NULL DEFAULT 0,
+          processed_count INTEGER NOT NULL DEFAULT 0,
+          succeeded_count INTEGER NOT NULL DEFAULT 0,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS analysis_task_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL,
+          photo_id INTEGER NOT NULL,
+          position INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued',
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          current_execution_level INTEGER,
+          error_code TEXT,
+          error_message TEXT,
+          analysis_version_id INTEGER,
+          started_at TEXT,
+          finished_at TEXT,
+          UNIQUE(task_id, photo_id),
+          FOREIGN KEY(task_id) REFERENCES analysis_tasks(id),
+          FOREIGN KEY(photo_id) REFERENCES photos(id),
+          FOREIGN KEY(analysis_version_id) REFERENCES analysis_versions(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_channels (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          provider_preset TEXT NOT NULL,
+          credential_source TEXT NOT NULL DEFAULT 'none',
+          credential_ciphertext TEXT,
+          credential_env_var TEXT,
+          is_enabled INTEGER NOT NULL DEFAULT 1,
+          current_version_id INTEGER,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_channel_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          channel_id INTEGER NOT NULL,
+          version_number INTEGER NOT NULL,
+          base_url TEXT NOT NULL,
+          models_json TEXT NOT NULL DEFAULT '[]',
+          default_model TEXT,
+          timeout_seconds INTEGER NOT NULL DEFAULT 100,
+          created_at TEXT NOT NULL,
+          UNIQUE(channel_id, version_number),
+          FOREIGN KEY(channel_id) REFERENCES model_channels(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL,
+          title TEXT NOT NULL,
+          message TEXT NOT NULL,
+          target_url TEXT,
+          is_read INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          read_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analysis_tasks_status ON analysis_tasks(status, queue_position)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_analysis_task_items_task_status ON analysis_task_items(task_id, status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read, created_at)"
+    )
+
+
+def _legacy_value(row: sqlite3.Row, column: str):
+    return row[column] if column in row.keys() else None
+
+
+def _backfill_analysis_versions(conn: sqlite3.Connection, now: str) -> None:
+    if not _table_exists(conn, "photo_scores"):
+        return
+
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT photos.id AS photo_id, photos.current_analysis_version_id,
+               photo_scores.*
+        FROM photos
+        JOIN photo_scores ON photo_scores.path = photos.path
+        WHERE photos.current_analysis_version_id IS NULL
+        ORDER BY photos.id
+        """
+    ).fetchall()
+    for row in rows:
+        existing = conn.execute(
+            "SELECT id FROM analysis_versions WHERE photo_id = ? ORDER BY version_number DESC",
+            (row["photo_id"],),
+        ).fetchone()
+        if existing is None:
+            cursor = conn.execute(
+                """
+                INSERT INTO analysis_versions
+                (photo_id, source_task_item_id, version_number, caption,
+                 side_caption, photo_type, memory_score, beauty_score, reason,
+                 crop_focus_json, analysis_channel, analysis_model, result_json,
+                 created_at)
+                VALUES (?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["photo_id"],
+                    _legacy_value(row, "caption"),
+                    _legacy_value(row, "side_caption"),
+                    _legacy_value(row, "type"),
+                    _legacy_value(row, "memory_score"),
+                    _legacy_value(row, "beauty_score"),
+                    _legacy_value(row, "reason"),
+                    _legacy_value(row, "crop_focus_json"),
+                    _legacy_value(row, "analysis_channel"),
+                    _legacy_value(row, "analysis_model"),
+                    _legacy_value(row, "raw_json"),
+                    now,
+                ),
+            )
+            version_id = int(cursor.lastrowid)
+        else:
+            version_id = int(existing["id"])
+        conn.execute(
+            """
+            UPDATE photos
+            SET current_analysis_version_id = ?, analysis_status = 'analyzed'
+            WHERE id = ?
+            """,
+            (version_id, row["photo_id"]),
+        )
 
 
 def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
-    """Create the first-phase photo identity tables and backfill from photo_scores."""
+    """Upgrade the compatible photo schema and backfill legacy analysis data."""
 
     db = Path(db_path).expanduser()
     conn = sqlite3.connect(db)
@@ -113,6 +337,7 @@ def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
             size_bytes = source.stat().st_size if is_file else None
             mtime = source.stat().st_mtime if is_file else None
             status = "analyzed" if is_file else "missing"
+            file_status = "present" if is_file else "missing"
             missing_at = None if is_file else now
             exists_on_disk = 1 if is_file else 0
             if not is_file:
@@ -120,7 +345,8 @@ def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
 
             existing = conn.execute(
                 """
-                SELECT id, size_bytes, mtime, exists_on_disk, status, missing_at
+                SELECT id, size_bytes, mtime, exists_on_disk, status, missing_at,
+                       file_status
                 FROM photos
                 WHERE path = ?
                 """,
@@ -131,8 +357,9 @@ def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
                     """
                     INSERT INTO photos
                     (path, file_hash, size_bytes, mtime, exists_on_disk, status,
+                     file_status, analysis_status, visibility_status,
                      created_at, updated_at, missing_at)
-                    VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, NULL, ?, ?, ?, ?, ?, 'analyzed', 'active', ?, ?, ?)
                     """,
                     (
                         raw_path,
@@ -140,6 +367,7 @@ def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
                         mtime,
                         exists_on_disk,
                         status,
+                        file_status,
                         now,
                         now,
                         missing_at,
@@ -155,6 +383,7 @@ def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
                 or existing[4] != status
                 or (exists_on_disk == 1 and existing[5] is not None)
                 or (exists_on_disk == 0 and existing[5] is None)
+                or existing[6] != file_status
             )
             if not should_update:
                 continue
@@ -166,6 +395,7 @@ def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
                     mtime = ?,
                     exists_on_disk = ?,
                     status = ?,
+                    file_status = ?,
                     updated_at = ?,
                     missing_at = CASE
                         WHEN ? = 1 THEN NULL
@@ -174,10 +404,21 @@ def ensure_photo_identity_schema(db_path: str | Path) -> PhotoIdentitySummary:
                     END
                 WHERE path = ?
                 """,
-                (size_bytes, mtime, exists_on_disk, status, now, exists_on_disk, now, raw_path),
+                (
+                    size_bytes,
+                    mtime,
+                    exists_on_disk,
+                    status,
+                    file_status,
+                    now,
+                    exists_on_disk,
+                    now,
+                    raw_path,
+                ),
             )
             updated += 1
 
+        _backfill_analysis_versions(conn, now)
         total = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
         conn.commit()
         return PhotoIdentitySummary(
