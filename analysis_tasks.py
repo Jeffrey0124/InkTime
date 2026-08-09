@@ -438,6 +438,151 @@ class AnalysisTaskService:
             "total_count": len(photo_ids),
         }
 
+    def control_task(self, task_id: int, action: str) -> dict[str, Any]:
+        transitions = {
+            ("queued", "cancel"): "cancelled",
+            ("running", "pause"): "pausing",
+            ("running", "stop"): "stopping",
+            ("pausing", "stop"): "stopping",
+            ("paused", "resume"): "queued",
+            ("paused", "stop"): "stopped",
+        }
+        if action not in {"cancel", "pause", "resume", "stop"}:
+            raise AnalysisTaskError("任务操作无效")
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM analysis_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise AnalysisTaskError("任务不存在", code="task_not_found", status=404)
+            current_status = str(row["status"])
+            next_status = transitions.get((current_status, action))
+            if next_status is None:
+                raise AnalysisTaskError(
+                    "当前任务状态不允许此操作",
+                    code="invalid_task_transition",
+                    status=409,
+                )
+            if next_status in {"cancelled", "stopped"}:
+                item_status = "cancelled" if next_status == "cancelled" else "stopped"
+                conn.execute(
+                    "UPDATE analysis_task_items SET status=?, finished_at=? "
+                    "WHERE task_id=? AND status='queued'",
+                    (item_status, now, task_id),
+                )
+                conn.execute(
+                    "UPDATE analysis_tasks SET status=?, finished_at=?, updated_at=? WHERE id=?",
+                    (next_status, now, now, task_id),
+                )
+                conn.execute(
+                    "DELETE FROM analysis_task_occupancy WHERE task_id=?", (task_id,)
+                )
+            elif action == "resume":
+                # A paused task owns the active queue slot. Resuming it must continue
+                # before tasks reordered while the queue was paused.
+                conn.execute(
+                    "UPDATE analysis_tasks SET status=?, queue_position=0, updated_at=? WHERE id=?",
+                    (next_status, now, task_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE analysis_tasks SET status=?, updated_at=? WHERE id=?",
+                    (next_status, now, task_id),
+                )
+            conn.commit()
+        except AnalysisTaskError:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_task(task_id) or {}
+
+    def reorder_task(self, task_id: int, queue_position: int) -> dict[str, Any]:
+        try:
+            requested_position = max(1, int(queue_position))
+        except (TypeError, ValueError) as exc:
+            raise AnalysisTaskError("队列位置无效") from exc
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM analysis_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise AnalysisTaskError("任务不存在", code="task_not_found", status=404)
+            if row["status"] != "queued":
+                raise AnalysisTaskError(
+                    "只有排队任务可以重排",
+                    code="invalid_task_transition",
+                    status=409,
+                )
+            queued_ids = [
+                int(item["id"])
+                for item in conn.execute(
+                    "SELECT id FROM analysis_tasks WHERE status='queued' "
+                    "ORDER BY COALESCE(queue_position, 2147483647), id"
+                )
+            ]
+            queued_ids.remove(task_id)
+            queued_ids.insert(min(requested_position - 1, len(queued_ids)), task_id)
+            now = _now()
+            conn.executemany(
+                "UPDATE analysis_tasks SET queue_position=?, updated_at=? WHERE id=?",
+                [(position, now, queued_id) for position, queued_id in enumerate(queued_ids, 1)],
+            )
+            conn.commit()
+        except AnalysisTaskError:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_task(task_id) or {}
+
+    def retry_task(self, task_id: int) -> dict[str, Any]:
+        conn = self._connect()
+        try:
+            task = conn.execute(
+                "SELECT name, task_type, status, concurrency, model_strategy_json "
+                "FROM analysis_tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+            if task is None:
+                raise AnalysisTaskError("任务不存在", code="task_not_found", status=404)
+            if task["status"] not in {"stopped", "completed_with_failures", "failed"}:
+                raise AnalysisTaskError(
+                    "当前任务没有可重试内容",
+                    code="invalid_task_transition",
+                    status=409,
+                )
+            photo_ids = [
+                int(row["photo_id"])
+                for row in conn.execute(
+                    "SELECT photo_id FROM analysis_task_items "
+                    "WHERE task_id=? AND status IN ('failed','stopped') ORDER BY position",
+                    (task_id,),
+                )
+            ]
+            strategy = json.loads(task["model_strategy_json"])
+        finally:
+            conn.close()
+        if not photo_ids:
+            raise AnalysisTaskError(
+                "当前任务没有可重试内容", code="no_retryable_items", status=409
+            )
+        return self.create_task(
+            {
+                "name": f"重试 · {task['name']}",
+                "task_type": task["task_type"],
+                "photo_ids": photo_ids,
+                "concurrency": int(task["concurrency"]),
+                "strategy_snapshot": strategy,
+                "confirmed_high_cost": True,
+            }
+        )
+
     def get_task(self, task_id: int) -> dict[str, Any] | None:
         conn = self._connect()
         try:

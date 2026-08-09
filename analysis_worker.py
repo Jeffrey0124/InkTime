@@ -75,7 +75,8 @@ class AnalysisWorker:
         try:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute(
-                "SELECT 1 FROM analysis_tasks WHERE status='running' LIMIT 1"
+                "SELECT 1 FROM analysis_tasks "
+                "WHERE status IN ('running','pausing','paused','stopping') LIMIT 1"
             ).fetchone():
                 conn.rollback()
                 return None
@@ -99,6 +100,50 @@ class AnalysisWorker:
             )
             conn.commit()
             return task
+        finally:
+            conn.close()
+
+    def _apply_control_boundary(self, task_id: int) -> str | None:
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM analysis_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return "failed"
+            status = str(row["status"])
+            if status == "pausing":
+                conn.execute(
+                    "UPDATE analysis_tasks SET status='paused', updated_at=? WHERE id=?",
+                    (now, task_id),
+                )
+                conn.commit()
+                return "paused"
+            if status == "stopping":
+                conn.execute(
+                    "UPDATE analysis_task_items SET status='stopped', finished_at=? "
+                    "WHERE task_id=? AND status='queued'",
+                    (now, task_id),
+                )
+                self._refresh_counts(conn, task_id, now)
+                conn.execute(
+                    "UPDATE analysis_tasks SET status='stopped', finished_at=?, updated_at=? "
+                    "WHERE id=?",
+                    (now, now, task_id),
+                )
+                conn.execute(
+                    "DELETE FROM analysis_task_occupancy WHERE task_id=?", (task_id,)
+                )
+                conn.commit()
+                return "stopped"
+            if status != "running":
+                conn.rollback()
+                return status
+            conn.rollback()
+            return None
         finally:
             conn.close()
 
@@ -303,7 +348,7 @@ class AnalysisWorker:
             self._refresh_counts(conn, task_id, now)
             conn.execute(
                 """
-                UPDATE analysis_tasks SET status='completed_with_failures',
+                UPDATE analysis_tasks SET status='failed',
                     finished_at=?, updated_at=? WHERE id=?
                 """,
                 (now, now, task_id),
@@ -327,13 +372,18 @@ class AnalysisWorker:
             if not levels:
                 raise RuntimeError("任务没有冻结的模型执行层级")
             level = dict(levels[0])
-            while (item := self._next_item(task_id)) is not None:
+            while True:
+                if self._apply_control_boundary(task_id) is not None:
+                    break
+                item = self._next_item(task_id)
+                if item is None:
+                    self._finish_task(task_id)
+                    break
                 try:
                     result = self.executor(Path(str(item["path"])), level)
                     self._save_success(task_id, item, result, level)
                 except Exception as exc:
                     self._save_failure(task_id, int(item["id"]), exc)
-            self._finish_task(task_id)
         except Exception as exc:
             self._fail_task(task_id, exc)
         conn = self._connect()
