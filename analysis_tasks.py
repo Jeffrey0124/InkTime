@@ -656,7 +656,11 @@ class AnalysisTaskService:
                 """
                 SELECT ati.photo_id, ati.position, ati.status, ati.attempt_count,
                        ati.current_execution_level, ati.error_code, ati.error_message,
-                       ati.started_at, ati.finished_at, p.filename
+                       ati.started_at, ati.finished_at,
+                       CASE WHEN ati.started_at IS NOT NULL AND ati.finished_at IS NOT NULL
+                         THEN ROUND((julianday(ati.finished_at) - julianday(ati.started_at)) * 86400, 1)
+                         ELSE NULL END AS duration_seconds,
+                       p.filename
                 FROM analysis_task_items ati JOIN photos p ON p.id=ati.photo_id
                 WHERE ati.task_id=? ORDER BY ati.position
                 """,

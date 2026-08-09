@@ -20,6 +20,7 @@ from PIL import ExifTags, Image, ImageOps
 
 from photo_identity import ensure_photo_identity_schema
 from photo_fingerprint import content_fingerprint
+from notifications import NotificationStore
 
 try:
     from pillow_heif import register_heif_opener
@@ -380,6 +381,12 @@ class LibraryScanner:
                 (_now(), type(exc).__name__, active_task_id),
             )
             conn.commit()
+            NotificationStore(self.db_path).create_once(
+                kind="scan_failed",
+                title="素材扫描失败",
+                message="素材扫描未完成，请检查目录可访问性后重试。",
+                target_url=f"/library/scans/{active_task_id}",
+            )
             raise
         finally:
             conn.close()

@@ -697,6 +697,91 @@
     render();
   };
 
+  const initTaskCenter = (root) => {
+    const list = root.querySelector("[data-task-list]");
+    const state = root.querySelector("[data-task-sync-state]");
+    const panel = root.querySelector("[data-notification-panel]");
+    const toggle = root.querySelector("[data-notification-toggle]");
+    const count = root.querySelector("[data-notification-count]");
+    let timer = null;
+    let slowPolling = false;
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+    const taskMarkup = (task) => `
+      <a class="task-list-row" href="/analysis-tasks/${task.task_id}">
+        <span class="state-label">${escapeHtml(task.queue_position ? `队列 ${task.queue_position}` : "历史")}</span><strong>${escapeHtml(task.name)}</strong>
+        <span>${task.processed_count}/${task.total_count} 张</span><span>${escapeHtml(task.created_at || "-")}</span>
+      </a>`;
+    const renderNotifications = (notifications) => {
+      const unread = notifications.filter((item) => !item.is_read);
+      count.textContent = String(unread.length);
+      panel.innerHTML = notifications.length ? notifications.map((item) => `
+        <a class="notification-row ${item.is_read ? "" : "unread"}" data-notification-id="${item.id}" href="${item.target_url || "/analysis-tasks"}">
+          <strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.message)}</span>
+        </a>`).join("") : "<p>暂无应用内通知。</p>";
+      panel.querySelectorAll("[data-notification-id]").forEach((item) => {
+        item.addEventListener("click", () => {
+          fetch(`/api/notifications/${item.dataset.notificationId}/read`, { method: "POST", headers: withCsrf() });
+        });
+      });
+    };
+    const refresh = async () => {
+      try {
+        const [tasks, notices] = await Promise.all([api("/api/analysis-tasks"), api("/api/notifications")]);
+        list.innerHTML = tasks.tasks.length ? tasks.tasks.map(taskMarkup).join("") : "<p class=\"settings-empty\">暂无分析任务。</p>";
+        renderNotifications(notices.notifications);
+        slowPolling = false;
+        state.textContent = "数据每 2 秒更新";
+      } catch (_) {
+        slowPolling = true;
+        state.textContent = "连接中断，正在以低频轮询重试";
+      } finally {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(refresh, slowPolling ? 10000 : 2000);
+      }
+    };
+    toggle?.addEventListener("click", () => { panel.hidden = !panel.hidden; });
+    window.addEventListener("online", () => { slowPolling = false; refresh(); });
+    refresh();
+  };
+
+  const initTaskDetail = (root) => {
+    const taskId = root.dataset.taskId;
+    const sync = root.querySelector("[data-task-sync-state]");
+    let timer = null;
+    let slowPolling = false;
+    const list = root.querySelector("[data-task-item-list]");
+    const filter = root.querySelector("[data-task-item-filter]");
+    let snapshotItems = [];
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+    const renderItems = () => {
+      const selected = filter?.value || "all";
+      const visible = snapshotItems.filter((item) => selected === "all" || (selected === "completed" ? item.status === "completed" : selected === "failed" ? item.status === "failed" : item.status === "queued"));
+      list.innerHTML = visible.length ? visible.map((item) => `<tr data-task-item-status="${escapeHtml(item.status)}"><td>${escapeHtml(item.filename)}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.current_execution_level || "-")}</td><td>${Number(item.attempt_count || 0)}</td><td>${escapeHtml(item.duration_seconds ?? "-")} 秒</td><td>${escapeHtml(item.error_message || "-")}</td></tr>`).join("") : "<tr><td colspan=\"6\">当前筛选没有素材。</td></tr>";
+    };
+    const refresh = async () => {
+      try {
+        const data = await api(`/api/analysis-tasks/${taskId}/snapshot`);
+        const task = data.task;
+        root.querySelector("[data-task-status]").textContent = task.status;
+        root.querySelector("[data-task-summary]").textContent = `${task.task_type === "reanalysis" ? "重新分析" : "增量分析"} · ${task.total_count} 张 · 并发 ${task.concurrency} · 当前 ${task.current_filename || "等待领取"}`;
+        root.querySelectorAll("[data-task-count]").forEach((node) => { node.textContent = task[node.dataset.taskCount]; });
+        snapshotItems = data.items;
+        renderItems();
+        slowPolling = false;
+        sync.textContent = "数据每 2 秒更新";
+      } catch (_) {
+        slowPolling = true;
+        sync.textContent = "连接中断，正在以低频轮询重试";
+      } finally {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(refresh, slowPolling ? 10000 : 2000);
+      }
+    };
+    window.addEventListener("online", () => { slowPolling = false; refresh(); });
+    filter?.addEventListener("change", renderItems);
+    refresh();
+  };
+
   const initSettings = async (root) => {
     const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -943,6 +1028,8 @@
     document.querySelectorAll("[data-detail-caption-editor]").forEach(initDetailCaptionEditor);
     document.querySelectorAll("[data-log-toggle]").forEach(initDashboardLog);
     document.querySelectorAll("[data-library-selection]").forEach(initLibrarySelection);
+    document.querySelectorAll("[data-task-center]").forEach(initTaskCenter);
+    document.querySelectorAll("[data-task-detail]").forEach(initTaskDetail);
     document.querySelectorAll("[data-settings-app]").forEach((root) => initSettings(root).catch(() => {
       const warning = root.querySelector("[data-settings-warning]");
       if (warning) { warning.hidden = false; warning.textContent = "配置加载失败，请刷新重试。"; }

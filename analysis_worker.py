@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from photo_identity import ensure_photo_identity_schema
 from photo_scores_schema import ensure_photo_scores_schema
+from notifications import NotificationStore
 from settings_store import SettingsStore
 
 
@@ -65,6 +66,7 @@ class AnalysisWorker:
     def __init__(self, db_path: str | Path, executor: AnalysisExecutor) -> None:
         self.db_path = Path(db_path)
         self.executor = executor
+        self.notifications = NotificationStore(self.db_path)
         ensure_photo_identity_schema(self.db_path)
         conn = self._connect()
         try:
@@ -272,6 +274,12 @@ class AnalysisWorker:
             conn.commit()
         finally:
             conn.close()
+        self.notifications.create_once(
+            kind="analysis_channels_paused",
+            title="模型通道不可用，任务已暂停",
+            message=f"任务 #{task_id} 已暂停，请检查模型凭据或通道后恢复。",
+            target_url=f"/analysis-tasks/{task_id}",
+        )
 
     @staticmethod
     def _is_retryable(exc: Exception) -> bool:
@@ -462,6 +470,20 @@ class AnalysisWorker:
             conn.commit()
         finally:
             conn.close()
+        if status == "completed":
+            self.notifications.create_once(
+                kind="analysis_completed",
+                title="分析任务已完成",
+                message=f"任务 #{task_id} 的全部照片已分析完成。",
+                target_url=f"/analysis-tasks/{task_id}",
+            )
+        else:
+            self.notifications.create_once(
+                kind="analysis_partial_failure",
+                title="分析任务部分失败",
+                message=f"任务 #{task_id} 已结束，存在 {failed} 张失败照片。",
+                target_url=f"/analysis-tasks/{task_id}",
+            )
 
     def _fail_task(self, task_id: int, exc: Exception) -> None:
         now = _now()
@@ -493,6 +515,12 @@ class AnalysisWorker:
             raise
         finally:
             conn.close()
+        self.notifications.create_once(
+            kind="analysis_failed",
+            title="分析任务已停止",
+            message=f"任务 #{task_id} 因执行错误停止，可在任务中心重试失败项。",
+            target_url=f"/analysis-tasks/{task_id}",
+        )
 
     def run_once(self) -> dict[str, Any] | None:
         task = self._claim_task()
