@@ -197,6 +197,19 @@ class WebAuthTests(unittest.TestCase):
         self.assertNotIn(str(self.root), listing.get_data(as_text=True))
         self.assertRegex(payload["source_url"], r"^/media/previews/\d+\.jpg$")
 
+        self.assertEqual(self.client.get(payload["source_url"]).status_code, 404)
+        self.login("initial-pass")
+        self.change_password("initial-pass", "new-password")
+        with self.client.get(payload["source_url"]) as preview:
+            self.assertEqual(preview.status_code, 200)
+            self.assertEqual(preview.mimetype, "image/jpeg")
+        with self.client.get(f"/api/photos/{payload['photo_id']}/source") as original:
+            self.assertEqual(original.status_code, 200)
+            self.assertEqual(original.mimetype, "image/jpeg")
+        self.client.post(
+            "/api/auth/logout",
+            headers={"X-CSRF-Token": self.client.get("/api/auth/session").get_json()["csrf_token"]},
+        )
         with self.client.get(payload["source_url"]) as preview:
             self.assertEqual(preview.status_code, 200)
             self.assertEqual(preview.mimetype, "image/jpeg")

@@ -91,6 +91,17 @@ class LibraryQueryTests(unittest.TestCase):
             names = [item["filename"] for item in descending["items"]]
             self.assertEqual(names, sorted(names, reverse=True))
 
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "UPDATE photos SET visibility_status='archived', archived_at='2026-03-01' WHERE filename='old.jpg'"
+            )
+            conn.commit()
+            conn.close()
+            archived = load_library_assets(db_path, visibility_status="archived")
+            self.assertEqual([item["filename"] for item in archived["items"]], ["old.jpg"])
+            self.assertEqual(archived["items"][0]["visibility_status"], "archived")
+            self.assertEqual(archived["summary"]["visibility_status"]["archived"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

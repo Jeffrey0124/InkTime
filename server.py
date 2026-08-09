@@ -19,7 +19,7 @@ from urllib.parse import quote, urlsplit
 
 import click
 from flask import Flask, abort, g, jsonify, redirect, request, send_file, session
-from PIL import Image, ImageOps
+from asset_maintenance import AssetMaintenance
 
 from analysis_tasks import AnalysisTaskError, AnalysisTaskService
 from analysis_worker import AnalysisWorker, AnalysisWorkerRunner, LegacyAnalysisExecutor
@@ -699,10 +699,11 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
         rows.append(
             f"""
             <tr>
-              <td><input type="checkbox" aria-label="选择 {_esc(item['filename'])}" data-library-photo value="{_esc(item['photo_id'])}"></td>
+              <td><input type="checkbox" name="photo_ids" form="asset-archive-form" aria-label="选择 {_esc(item['filename'])}" data-library-photo value="{_esc(item['photo_id'])}"></td>
               <td><img class="asset-thumb" src="{_esc(item['preview_url'])}" alt=""></td>
               <td><strong>{_esc(item['filename'])}</strong><small>{_esc(item['directory'] or '根目录')}</small></td>
               <td><span class="state-label">{_esc(item['file_status'])}</span></td>
+              <td>{'已归档' if item['visibility_status'] == 'archived' else '显示中'}</td>
               <td>{_esc(item['analysis_status'])}</td>
               <td>{_esc(item['captured_at'] or '-')}</td>
               <td>{'有' if item['has_gps'] else '无'}</td>
@@ -711,7 +712,7 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
             </tr>
             """
         )
-    body = "".join(rows) or '<tr><td colspan="9" class="empty">当前筛选没有素材。</td></tr>'
+    body = "".join(rows) or '<tr><td colspan="10" class="empty">当前筛选没有素材。</td></tr>'
     selection_context = {
         "filters": {key: value for key, value in filters.items() if key not in {"sort", "order"} and value},
         "sort": filters.get("sort") or "created_at",
@@ -734,6 +735,7 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
       <form class="library-filters" method="get">
         <label>文件状态<select name="file_status"><option value="">全部</option><option value="present"{selected('file_status', 'present')}>可读</option><option value="unreadable"{selected('file_status', 'unreadable')}>不可读</option><option value="missing"{selected('file_status', 'missing')}>缺失</option></select></label>
         <label>分析状态<select name="analysis_status"><option value="">全部</option><option value="pending"{selected('analysis_status', 'pending')}>未分析</option><option value="analyzed"{selected('analysis_status', 'analyzed')}>已分析</option></select></label>
+        <label>显示状态<select name="visibility_status"><option value="">全部</option><option value="active"{selected('visibility_status', 'active')}>显示中</option><option value="archived"{selected('visibility_status', 'archived')}>已归档</option></select></label>
         <label>拍摄日期从<input type="date" name="captured_from" value="{_esc(filters.get('captured_from'))}"></label>
         <label>至<input type="date" name="captured_to" value="{_esc(filters.get('captured_to'))}"></label>
         <label>GPS<select name="has_gps"><option value="">全部</option><option value="1"{selected('has_gps', '1')}>有 GPS</option><option value="0"{selected('has_gps', '0')}>无 GPS</option></select></label>
@@ -745,6 +747,9 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
         <label>方向<select name="order"><option value="desc"{selected('order', 'desc')}>新到旧 / 大到小</option><option value="asc"{selected('order', 'asc')}>旧到新 / 小到大</option></select></label>
         <button class="ghost-button" type="submit">应用筛选</button>
       </form>
+      <form id="asset-archive-form" method="post" action="/api/library/archive">
+        <input type="hidden" name="csrf_token" value="{_esc(session.get('csrf_token') or '')}">
+      </form>
       <div class="library-selection-bar" aria-label="素材选择操作">
         <strong><span data-selection-count>0</span> 张已选择</strong>
         <button class="button" type="button" data-select-filtered>全选当前筛选</button>
@@ -752,9 +757,11 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
         <button class="button" type="button" data-select-top>选择</button>
         <button class="text-button" type="button" data-selection-clear>清空</button>
         <span class="save-state" data-selection-state aria-live="polite"></span>
+        <button class="ghost-button" type="submit" form="asset-archive-form" name="archived" value="true">归档所选</button>
+        <button class="ghost-button" type="submit" form="asset-archive-form" name="archived" value="false">恢复显示</button>
         <button class="primary-button" type="button" data-task-open>创建分析任务</button>
       </div>
-      <div class="asset-table-wrap"><table class="asset-table"><thead><tr><th><span class="visually-hidden">选择</span></th><th>预览</th><th>文件</th><th>文件状态</th><th>分析状态</th><th>拍摄日期</th><th>GPS</th><th>AI 类型</th><th>大小</th></tr></thead><tbody>{body}</tbody></table></div>
+      <div class="asset-table-wrap"><table class="asset-table"><thead><tr><th><span class="visually-hidden">选择</span></th><th>预览</th><th>文件</th><th>文件状态</th><th>显示状态</th><th>分析状态</th><th>拍摄日期</th><th>GPS</th><th>AI 类型</th><th>大小</th></tr></thead><tbody>{body}</tbody></table></div>
       <dialog class="analysis-task-dialog" data-analysis-task-dialog>
         <form method="dialog" class="analysis-task-dialog-card" data-analysis-task-form>
           <div class="dialog-head"><div><p class="kicker">Analysis Task</p><h3>创建分析任务</h3></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div>
@@ -1242,6 +1249,7 @@ def create_app(
     scan_interval_minutes: float | None = None,
     analysis_worker_enabled: bool | None = None,
     analysis_executor=None,
+    display_preview_dir: str | Path | None = None,
 ) -> Flask:
     app = Flask(__name__)
     auth_enabled = True if auth_required is None else bool(auth_required)
@@ -1251,7 +1259,8 @@ def create_app(
     )
     push_dir = _resolve_path(_config_value("PUSH_OUTPUT_DIR", "./output/push"))
     preview_dir = _resolve_path(
-        _config_value("DISPLAY_PREVIEW_DIR", "./output/previews")
+        display_preview_dir
+        or ((db.parent / "previews") if db_path is not None else _config_value("DISPLAY_PREVIEW_DIR", "./output/previews"))
     )
     ensure_photo_identity_schema(db)
     ensure_push_schema(db)
@@ -1307,6 +1316,8 @@ def create_app(
         analysis_runner.start()
         app.extensions["analysis_worker_runner"] = analysis_runner
         atexit.register(lambda: analysis_runner.shutdown(wait=False))
+    asset_maintenance = AssetMaintenance(db, preview_dir)
+    app.extensions["asset_maintenance"] = asset_maintenance
     library_root = _resolve_path(scan_root or _config_value("IMAGE_DIR", "./sample_photos"))
     scanner = LibraryScanner(
         db,
@@ -1541,7 +1552,7 @@ def create_app(
 
     def library_query() -> tuple[dict[str, Any], dict[str, str]]:
         values = {key: str(request.args.get(key, "") or "") for key in (
-            "file_status", "analysis_status", "captured_from", "captured_to",
+            "file_status", "analysis_status", "visibility_status", "captured_from", "captured_to",
             "has_gps", "file_type", "type", "directory", "filename", "sort", "order",
         )}
         gps = None if values["has_gps"] == "" else values["has_gps"] in {"1", "true", "yes"}
@@ -1549,6 +1560,7 @@ def create_app(
             db,
             file_status=values["file_status"],
             analysis_status=values["analysis_status"],
+            visibility_status=values["visibility_status"],
             captured_from=values["captured_from"],
             captured_to=values["captured_to"],
             has_gps=gps,
@@ -1580,6 +1592,25 @@ def create_app(
         if request.accept_mimetypes.accept_html and not request.is_json:
             return redirect("/library")
         return jsonify(response), 200 if started.reused else 202
+
+    @app.post("/api/library/archive")
+    def api_library_archive():
+        payload = request.get_json(silent=True) or request.form
+        raw_ids = payload.get("photo_ids", [])
+        if isinstance(raw_ids, str):
+            raw_ids = request.form.getlist("photo_ids") or [raw_ids]
+        if not isinstance(raw_ids, (list, tuple)):
+            return jsonify({"ok": False, "error": "photo_ids_required"}), 400
+        try:
+            photo_ids = [int(value) for value in raw_ids]
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid_photo_ids"}), 400
+        archived_value = payload.get("archived", True)
+        archived = archived_value is True or str(archived_value).lower() in {"1", "true", "yes"}
+        updated = asset_maintenance.set_archived(photo_ids, archived=archived)
+        if request.accept_mimetypes.accept_html and not request.is_json:
+            return redirect("/library?visibility_status=archived" if archived else "/library")
+        return jsonify({"ok": True, "updated": updated, "archived": archived})
 
     @app.get("/api/library/scans/<int:task_id>")
     def api_library_scan_status(task_id: int):
@@ -1674,39 +1705,19 @@ def create_app(
 
     @app.get("/media/previews/<int:photo_id>.jpg")
     def photo_preview(photo_id: int):
-        photo = load_photo(db, photo_id)
-        source = (
-            Path(str(photo.get("path") or "")).expanduser()
-            if photo is not None and photo.get("exists_on_disk")
-            else load_library_source(db, photo_id) if g.is_admin else None
+        target = (
+            asset_maintenance.ensure_preview(photo_id)
+            if g.is_admin
+            else asset_maintenance.cached_preview(photo_id)
         )
-        if source is None:
-            abort(404)
-        if not source.is_file():
-            abort(404)
-        try:
-            fingerprint = source.stat().st_mtime_ns
-            preview_dir.mkdir(parents=True, exist_ok=True)
-            target = preview_dir / f"{photo_id}-{fingerprint}.jpg"
-            if not target.exists():
-                with Image.open(source) as image:
-                    display = ImageOps.exif_transpose(image).convert("RGB")
-                    display.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-                    display.save(target, format="JPEG", quality=86, optimize=True)
-                for stale in preview_dir.glob(f"{photo_id}-*.jpg"):
-                    if stale != target:
-                        stale.unlink(missing_ok=True)
-        except (OSError, ValueError):
+        if target is None:
             abort(404)
         return send_file(target, mimetype="image/jpeg", max_age=3600)
 
     @app.get("/api/photos/<int:photo_id>/source")
     def photo_source(photo_id: int):
-        photo = load_photo(db, photo_id)
-        if photo is None or not photo.get("exists_on_disk"):
-            abort(404)
-        target = Path(str(photo.get("path") or "")).expanduser()
-        if not target.exists() or not target.is_file():
+        target = load_library_source(db, photo_id)
+        if target is None:
             abort(404)
         return send_file(target)
 

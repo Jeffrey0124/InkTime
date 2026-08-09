@@ -501,6 +501,23 @@ h3 {
   font-size: 13px;
 }
 
+.asset-selection-form {
+  display: grid;
+  gap: 12px;
+}
+
+.asset-selection-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.asset-table input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--green);
+}
+
 .library-filters input,
 .library-filters select {
   min-width: 0;

@@ -127,6 +127,54 @@ class LibraryRouteTests(unittest.TestCase):
             app.extensions["scan_scheduler"].shutdown(wait=True)
             app.extensions["scan_coordinator"].shutdown()
 
+    def test_admin_can_batch_archive_missing_assets_and_restore_visibility(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library = root / "library"
+            library.mkdir()
+            source = library / "missing.jpg"
+            Image.new("RGB", (20, 10), "red").save(source)
+            db_path = root / "photos.db"
+            app = create_app(
+                db_path=db_path,
+                render_output_dir=root / "renders",
+                auth_required=False,
+                scan_root=library,
+                scan_startup=False,
+            )
+            client = app.test_client()
+            task_id = client.post("/api/library/scan").get_json()["task_id"]
+            app.extensions["scan_coordinator"].wait(task_id, timeout=5)
+            conn = sqlite3.connect(db_path)
+            photo_id = conn.execute("SELECT id FROM photos").fetchone()[0]
+            conn.close()
+            source.unlink()
+            task_id = client.post("/api/library/scan").get_json()["task_id"]
+            app.extensions["scan_coordinator"].wait(task_id, timeout=5)
+
+            archived = client.post(
+                "/api/library/archive", json={"photo_ids": [photo_id], "archived": True}
+            )
+            self.assertEqual(archived.status_code, 200)
+            self.assertEqual(archived.get_json()["updated"], 1)
+            payload = client.get("/api/library?visibility_status=archived").get_json()
+            self.assertEqual(payload["items"][0]["photo_id"], photo_id)
+            self.assertEqual(payload["items"][0]["file_status"], "missing")
+
+            restored = client.post(
+                "/api/library/archive", json={"photo_ids": [photo_id], "archived": False}
+            )
+            self.assertEqual(restored.status_code, 200)
+            self.assertEqual(
+                client.get("/api/library?visibility_status=active").get_json()["items"][0]["photo_id"],
+                photo_id,
+            )
+            page = client.get("/library").get_data(as_text=True)
+            self.assertIn('name="photo_ids"', page)
+            self.assertIn("归档所选", page)
+            self.assertIn('name="visibility_status"', page)
+            app.extensions["scan_coordinator"].shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()
