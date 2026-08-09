@@ -558,6 +558,145 @@
     });
   };
 
+  const initLibrarySelection = (root) => {
+    const storageKey = "inktime:library-selection:v1";
+    const context = parseJson(root.dataset.selectionContext, {});
+    const dialog = root.querySelector("[data-analysis-task-dialog]");
+    const form = root.querySelector("[data-analysis-task-form]");
+    const summary = root.querySelector("[data-task-summary]");
+    const taskState = root.querySelector("[data-task-state]");
+    const highCost = root.querySelector("[data-high-cost]");
+    const count = root.querySelector("[data-selection-count]");
+    const selectionState = root.querySelector("[data-selection-state]");
+    let state = parseJson(sessionStorage.getItem(storageKey), { photoIds: [], selection: null });
+    let preview = null;
+    let previewRequest = 0;
+
+    const save = () => sessionStorage.setItem(storageKey, JSON.stringify(state));
+    const render = () => {
+      const selected = new Set((state.photoIds || []).map(Number));
+      root.querySelectorAll("[data-library-photo]").forEach((input) => {
+        input.checked = selected.has(Number(input.value));
+      });
+      count.textContent = String(selected.size);
+    };
+    const api = async (url, options = {}) => {
+      const response = await fetch(url, {
+        ...options,
+        headers: withCsrf({ "Content-Type": "application/json", ...(options.headers || {}) }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.ok === false) throw new Error(data.error || response.statusText);
+      return data;
+    };
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[char]);
+    const taskType = () => form.elements.namedItem("task_type").value;
+    const currentSelection = () => state.selection || {
+      kind: "manual",
+      photo_ids: state.photoIds || [],
+      filters: {},
+      sort: "filename",
+      order: "asc",
+    };
+    const describeReasons = (reasons) => Object.entries(reasons || {})
+      .map(([reason, value]) => `${({ already_analyzed: "已分析", not_analyzed: "尚未分析", file_unavailable: "文件不可用", not_active: "已归档", occupied: "已被任务占用" })[reason] || reason} ${value}`)
+      .join("，");
+    const loadPreview = async ({ updateSelection = true } = {}) => {
+      const requestId = ++previewRequest;
+      summary.textContent = "正在核对素材资格…";
+      taskState.textContent = "";
+      const data = await api("/api/library/selection-preview", {
+        method: "POST",
+        body: JSON.stringify({ task_type: taskType(), selection: currentSelection() }),
+      });
+      if (requestId !== previewRequest) return null;
+      preview = data.selection;
+      if (updateSelection) {
+        if (state.selection?.kind !== "manual") state.photoIds = preview.photo_ids;
+        if (state.selection) {
+          if (state.selection.sort === "random") state.selection.seed = preview.seed;
+          if (state.selection.kind !== "manual") {
+            state.selection.frozen_photo_ids = preview.frozen_photo_ids;
+          }
+        }
+        save(); render();
+      }
+      const levels = preview.execution_levels.map((item) => `${item.channel_name} / ${item.model_id}`).join(" → ");
+      const excluded = describeReasons(preview.excluded_reasons);
+      summary.innerHTML = `<strong>最终 ${escapeHtml(preview.selected_count)} 张</strong><span>匹配 ${escapeHtml(preview.matched_count)} · 合格 ${escapeHtml(preview.eligible_count)} · 排除 ${escapeHtml(preview.excluded_count)}${excluded ? `（${escapeHtml(excluded)}）` : ""}</span><span>模型：${escapeHtml(levels)}</span><span>最多 ${escapeHtml(preview.max_request_rounds)} 轮</span>`;
+      form.elements.namedItem("concurrency").value = String(preview.concurrency || 1);
+      highCost.hidden = !preview.requires_high_cost_confirmation;
+      highCost.querySelector("input").checked = false;
+      return preview;
+    };
+    const selectBy = async (selection) => {
+      state.selection = selection;
+      selectionState.textContent = "正在核对…";
+      try {
+        await loadPreview();
+        selectionState.textContent = "选择已更新";
+      } catch (error) { selectionState.textContent = `选择失败：${error.message}`; }
+    };
+
+    root.querySelectorAll("[data-library-photo]").forEach((input) => {
+      input.addEventListener("change", () => {
+        const selected = new Set((state.photoIds || []).map(Number));
+        if (input.checked) selected.add(Number(input.value)); else selected.delete(Number(input.value));
+        state.photoIds = [...selected];
+        state.selection = { kind: "manual", photo_ids: state.photoIds, filters: {}, sort: "filename", order: "asc" };
+        save(); render();
+      });
+    });
+    root.querySelector("[data-select-filtered]").addEventListener("click", () => selectBy({ kind: "all", ...context }));
+    root.querySelector("[data-select-top]").addEventListener("click", () => {
+      const limit = Math.max(1, Number(root.querySelector("[data-select-limit]").value || 1));
+      const selection = { kind: "top_n", limit, ...context };
+      if (selection.sort === "random") selection.seed = window.crypto.randomUUID();
+      selectBy(selection);
+    });
+    root.querySelector("[data-selection-clear]").addEventListener("click", () => {
+      state = { photoIds: [], selection: null }; preview = null; selectionState.textContent = ""; save(); render();
+    });
+    root.querySelector("[data-task-open]").addEventListener("click", async () => {
+      if (!(state.photoIds || []).length && !state.selection) { selectionState.textContent = "请先选择素材"; return; }
+      dialog.showModal();
+      try { await loadPreview(); } catch (error) { summary.textContent = `无法核对：${error.message}`; }
+    });
+    form.querySelectorAll('input[name="task_type"]').forEach((input) => input.addEventListener("change", () => {
+      loadPreview().catch((error) => { summary.textContent = `无法核对：${error.message}`; });
+    }));
+    form.addEventListener("submit", async (event) => {
+      if (event.submitter?.value === "cancel") { dialog.close(); return; }
+      event.preventDefault();
+      if (!preview?.photo_ids?.length) { taskState.textContent = "没有可创建任务的素材"; return; }
+      if (!highCost.hidden && !form.elements.namedItem("confirmed_high_cost").checked) {
+        taskState.textContent = "请先确认数量和费用"; return;
+      }
+      taskState.textContent = "正在创建任务…";
+      try {
+        const data = await api("/api/analysis-tasks", {
+          method: "POST",
+          body: JSON.stringify({
+            task_type: taskType(),
+            name: form.elements.namedItem("name").value.trim(),
+            concurrency: Number(form.elements.namedItem("concurrency").value || 1),
+            confirmed_high_cost: form.elements.namedItem("confirmed_high_cost").checked,
+            photo_ids: preview.photo_ids,
+            strategy_snapshot: {
+              execution_levels: preview.execution_levels,
+              max_request_rounds: preview.max_request_rounds,
+            },
+          }),
+        });
+        state = { photoIds: [], selection: null }; save(); render();
+        window.location.assign(`/analysis-tasks/${data.task.task_id}`);
+      } catch (error) { taskState.textContent = `创建失败：${error.message}`; }
+    });
+    render();
+  };
+
   const initSettings = async (root) => {
     const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -803,6 +942,7 @@
     document.querySelectorAll("[data-push-studio]").forEach(initPushStudio);
     document.querySelectorAll("[data-detail-caption-editor]").forEach(initDetailCaptionEditor);
     document.querySelectorAll("[data-log-toggle]").forEach(initDashboardLog);
+    document.querySelectorAll("[data-library-selection]").forEach(initLibrarySelection);
     document.querySelectorAll("[data-settings-app]").forEach((root) => initSettings(root).catch(() => {
       const warning = root.querySelector("[data-settings-warning]");
       if (warning) { warning.hidden = false; warning.textContent = "配置加载失败，请刷新重试。"; }
