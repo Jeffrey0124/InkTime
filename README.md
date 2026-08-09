@@ -152,6 +152,19 @@ python scheduler.py --run-once --slot 07:00
 
 详细设计见 `docs/push-strategy.md`。
 
+## WebUI 管理员登录
+
+WebUI 默认启用单管理员认证。首次启动前，在本地 `config.py` 或 NAS `.env` 中配置至少 8 个字符的一次性初始密码，以及至少 32 个随机字符的稳定会话密钥；首次登录后必须修改密码。访客无需登录即可查看画廊、照片详情和缓存预览，管理页面、原图与写操作需要管理员会话。
+
+忘记密码时，在服务端执行重置命令；该操作会注销全部已有会话，并要求下次登录再次修改密码：
+
+```powershell
+$env:FLASK_APP = "server.py"
+python -m flask reset-admin-password
+```
+
+不要把初始密码、会话密钥或重置后的密码提交到 Git。
+
 ## 飞牛 NAS Docker 部署
 
 推荐使用 Docker Compose 的双容器形态：

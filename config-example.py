@@ -43,6 +43,16 @@ FLASK_HOST = "127.0.0.1"
 FLASK_PORT = 8765
 ENABLE_REVIEW_WEBUI = True
 
+# WebUI 单管理员认证。首次密码和稳定会话密钥只从环境变量读取。
+ADMIN_INITIAL_PASSWORD = os.environ.get("INKTIME_ADMIN_INITIAL_PASSWORD", "")
+SESSION_SECRET = os.environ.get("INKTIME_SESSION_SECRET", "")
+AUTH_COOKIE_SECURE = os.environ.get("INKTIME_AUTH_COOKIE_SECURE", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+DISPLAY_PREVIEW_DIR = "./output/previews"
+
 # 离线中文城市名索引，用于根据照片 GPS 信息补充城市名。
 WORLD_CITIES_CSV = "./data/world_cities_zh.csv"
 CITY_GRID_DEG = 1.0
