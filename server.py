@@ -21,6 +21,7 @@ import click
 from flask import Flask, abort, g, jsonify, redirect, request, send_file, session
 from PIL import Image, ImageOps
 
+from analysis_tasks import AnalysisTaskError, AnalysisTaskService
 from photo_identity import ensure_photo_identity_schema
 from model_provider import ModelProviderClient
 from library_scanner import LibraryScanner, PeriodicScanScheduler, ScanCoordinator
@@ -697,6 +698,7 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
         rows.append(
             f"""
             <tr>
+              <td><input type="checkbox" aria-label="选择 {_esc(item['filename'])}" data-library-photo value="{_esc(item['photo_id'])}"></td>
               <td><img class="asset-thumb" src="{_esc(item['preview_url'])}" alt=""></td>
               <td><strong>{_esc(item['filename'])}</strong><small>{_esc(item['directory'] or '根目录')}</small></td>
               <td><span class="state-label">{_esc(item['file_status'])}</span></td>
@@ -708,9 +710,14 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
             </tr>
             """
         )
-    body = "".join(rows) or '<tr><td colspan="8" class="empty">当前筛选没有素材。</td></tr>'
+    body = "".join(rows) or '<tr><td colspan="9" class="empty">当前筛选没有素材。</td></tr>'
+    selection_context = {
+        "filters": {key: value for key, value in filters.items() if key not in {"sort", "order"} and value},
+        "sort": filters.get("sort") or "created_at",
+        "order": filters.get("order") or "desc",
+    }
     return f"""
-    <section class="screen library-screen" aria-labelledby="library-title">
+    <section class="screen library-screen" aria-labelledby="library-title" data-library-selection data-selection-context="{_esc(json.dumps(selection_context, ensure_ascii=False))}">
       <div class="section-heading">
         <div><p class="kicker">Asset Library</p><h2 id="library-title">素材库</h2></div>
         <form method="post" action="/api/library/scan">
@@ -733,11 +740,50 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
         <label>AI 类型<input name="type" value="{_esc(filters.get('type'))}"></label>
         <label>目录<input name="directory" value="{_esc(filters.get('directory'))}"></label>
         <label>文件名<input name="filename" value="{_esc(filters.get('filename'))}"></label>
-        <label>排序<select name="sort"><option value="created_at"{selected('sort', 'created_at')}>入库时间</option><option value="captured_at"{selected('sort', 'captured_at')}>拍摄日期</option><option value="filename"{selected('sort', 'filename')}>文件名</option><option value="size"{selected('sort', 'size')}>文件大小</option></select></label>
+        <label>排序<select name="sort"><option value="created_at"{selected('sort', 'created_at')}>入库时间</option><option value="captured_at"{selected('sort', 'captured_at')}>拍摄日期</option><option value="filename"{selected('sort', 'filename')}>文件名</option><option value="size"{selected('sort', 'size')}>文件大小</option><option value="random"{selected('sort', 'random')}>随机发现</option></select></label>
         <label>方向<select name="order"><option value="desc"{selected('order', 'desc')}>新到旧 / 大到小</option><option value="asc"{selected('order', 'asc')}>旧到新 / 小到大</option></select></label>
         <button class="ghost-button" type="submit">应用筛选</button>
       </form>
-      <div class="asset-table-wrap"><table class="asset-table"><thead><tr><th>预览</th><th>文件</th><th>文件状态</th><th>分析状态</th><th>拍摄日期</th><th>GPS</th><th>AI 类型</th><th>大小</th></tr></thead><tbody>{body}</tbody></table></div>
+      <div class="library-selection-bar" aria-label="素材选择操作">
+        <strong><span data-selection-count>0</span> 张已选择</strong>
+        <button class="button" type="button" data-select-filtered>全选当前筛选</button>
+        <label>选择前 <input type="number" min="1" value="20" data-select-limit> 张</label>
+        <button class="button" type="button" data-select-top>选择</button>
+        <button class="text-button" type="button" data-selection-clear>清空</button>
+        <span class="save-state" data-selection-state aria-live="polite"></span>
+        <button class="primary-button" type="button" data-task-open>创建分析任务</button>
+      </div>
+      <div class="asset-table-wrap"><table class="asset-table"><thead><tr><th><span class="visually-hidden">选择</span></th><th>预览</th><th>文件</th><th>文件状态</th><th>分析状态</th><th>拍摄日期</th><th>GPS</th><th>AI 类型</th><th>大小</th></tr></thead><tbody>{body}</tbody></table></div>
+      <dialog class="analysis-task-dialog" data-analysis-task-dialog>
+        <form method="dialog" class="analysis-task-dialog-card" data-analysis-task-form>
+          <div class="dialog-head"><div><p class="kicker">Analysis Task</p><h3>创建分析任务</h3></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></div>
+          <div class="task-mode-control" role="group" aria-label="分析模式"><label><input type="radio" name="task_type" value="incremental" checked> 增量分析</label><label><input type="radio" name="task_type" value="reanalysis"> 重新分析</label></div>
+          <label class="field-stack"><span>任务名称（可选）</span><input name="name" placeholder="留空自动命名"></label>
+          <label class="field-stack"><span>任务内并发</span><input name="concurrency" type="number" min="1" max="4" value="1"></label>
+          <div class="task-confirm-summary" data-task-summary>正在核对素材资格…</div>
+          <label class="high-cost-confirm" data-high-cost hidden><input type="checkbox" name="confirmed_high_cost"> 我已确认本次分析数量和可能产生的模型费用</label>
+          <p class="save-state" data-task-state aria-live="polite"></p>
+          <div class="dialog-actions"><button class="button" value="cancel">取消</button><button class="primary-button" type="submit" value="default">创建任务</button></div>
+        </form>
+      </dialog>
+    </section>
+    """
+
+
+def _render_analysis_task_page(task: dict[str, Any]) -> str:
+    mode = "重新分析" if task["task_type"] == "reanalysis" else "增量分析"
+    levels = "".join(
+        f"<li><span>{index + 1}</span><strong>{_esc(item['channel_name'])}</strong><small>{_esc(item['model_id'])} · v{_esc(item['channel_version'])}</small></li>"
+        for index, item in enumerate(task["strategy"].get("execution_levels") or [])
+    )
+    return f"""
+    <section class="screen analysis-task-screen" aria-labelledby="analysis-task-title">
+      <div class="section-heading"><div><p class="kicker">Analysis Task</p><h2 id="analysis-task-title">{_esc(task['name'])}</h2></div><a class="button" href="/library">返回素材库</a></div>
+      <section class="task-created-panel">
+        <div><span class="state-label">{_esc(task['status'])}</span><h3>任务已进入队列</h3><p>{_esc(mode)} · {_esc(task['total_count'])} 张 · 并发 {_esc(task['concurrency'])} · 队列位置 {_esc(task['queue_position'])}</p></div>
+        <dl><div><dt>已处理</dt><dd>{_esc(task['processed_count'])}</dd></div><div><dt>成功</dt><dd>{_esc(task['succeeded_count'])}</dd></div><div><dt>失败</dt><dd>{_esc(task['failed_count'])}</dd></div></dl>
+      </section>
+      <section class="task-strategy-panel"><p class="kicker">Frozen Strategy</p><h3>模型执行策略</h3><ol>{levels}</ol><p>该任务已冻结素材集合和非敏感模型配置；凭据将在 Worker 执行时读取。</p></section>
     </section>
     """
 
@@ -1081,6 +1127,9 @@ def _render_settings_page() -> str:
             <h3>分析默认值</h3>
             <div class="settings-field-grid">
               <label>单次任务数量<input name="batch_size" type="number" min="1" value="10"></label>
+              <label>任务内并发<input name="concurrency" type="number" min="1" max="4" value="1"></label>
+              <label>高费用确认阈值<input name="high_cost_threshold" type="number" min="1" value="50"></label>
+              <label>最大请求轮次<input name="max_request_rounds" type="number" min="1" max="2" value="2"></label>
               <label>图像最长边<input name="max_long_edge" type="number" min="256" value="2560"></label>
               <label>提示词方案<select name="prompt_profile"><option value="balanced">均衡</option><option value="memory">回忆优先</option><option value="beauty">美观优先</option></select></label>
             </div>
@@ -1217,6 +1266,7 @@ def create_app(
         ),
     )
     provider_client = model_provider or ModelProviderClient()
+    analysis_task_service = AnalysisTaskService(db, settings_store)
     auth = WebAuth(
         db,
         initial_password=(
@@ -1241,6 +1291,7 @@ def create_app(
     )
     app.extensions["web_auth"] = auth
     app.extensions["settings_store"] = settings_store
+    app.extensions["analysis_task_service"] = analysis_task_service
     library_root = _resolve_path(scan_root or _config_value("IMAGE_DIR", "./sample_photos"))
     scanner = LibraryScanner(
         db,
@@ -1521,6 +1572,33 @@ def create_app(
         if task is None:
             abort(404)
         return jsonify({"ok": True, "task": task})
+
+    @app.post("/api/library/selection-preview")
+    def api_library_selection_preview():
+        try:
+            selection = analysis_task_service.preview_selection(request.get_json(silent=True) or {})
+        except AnalysisTaskError as exc:
+            return jsonify({"ok": False, "error": str(exc), "code": exc.code}), exc.status
+        return jsonify({"ok": True, "selection": selection})
+
+    @app.post("/api/analysis-tasks")
+    def api_analysis_tasks_create():
+        try:
+            task = analysis_task_service.create_task(request.get_json(silent=True) or {})
+        except AnalysisTaskError as exc:
+            return jsonify({"ok": False, "error": str(exc), "code": exc.code}), exc.status
+        return jsonify({"ok": True, "task": task}), 201
+
+    @app.get("/analysis-tasks/<int:task_id>")
+    def analysis_task_detail(task_id: int):
+        task = analysis_task_service.get_task(task_id)
+        if task is None:
+            abort(404)
+        return _page(
+            f"InkTime 分析任务 #{task_id}",
+            _render_analysis_task_page(task),
+            active="library",
+        )
 
     @app.get("/gallery")
     def gallery():
