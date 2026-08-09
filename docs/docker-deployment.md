@@ -42,9 +42,19 @@ DATA_DIR=/vol1/docker/inktime/data
 LOCAL_VLM_API_URL=http://你的电脑局域网IP:9100/v1/chat/completions
 CLOUD_QWEN_API_KEY=你的云端API_KEY
 INKTIME_PUSH_API_TOKEN=你自己的手动推送token
+INKTIME_ADMIN_INITIAL_PASSWORD=至少8位的一次性初始密码
+INKTIME_SESSION_SECRET=至少32位的随机会话密钥
 ```
 
 注意：容器在 NAS 内运行，`127.0.0.1` 指的是 NAS 容器自己，不能代表你的电脑。局域网本地模型必须填写电脑的固定 IP。
+
+首次登录后必须修改初始密码。忘记密码时执行以下命令，命令会注销全部已有管理员会话，并要求下次登录重新修改密码：
+
+```bash
+sudo docker compose exec web python -m flask --app server.py reset-admin-password
+```
+
+真实密码与会话密钥只能保存在 NAS `.env` 中，不要写入镜像、文档或 Git。
 
 ## 启动服务
 

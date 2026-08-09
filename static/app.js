@@ -1,4 +1,6 @@
 (() => {
+  const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
+  const withCsrf = (headers = {}) => ({ ...headers, "X-CSRF-Token": csrfToken });
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
   const palette = [
     [0, 0, 0],
@@ -465,7 +467,7 @@
     const saveOverrides = async () => {
       const response = await fetch(root.dataset.saveUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withCsrf({ "Content-Type": "application/json" }),
         body: JSON.stringify(payload()),
       });
       const data = await response.json().catch(() => ({}));
@@ -494,7 +496,7 @@
         let token = window.sessionStorage.getItem("inktimePushToken") || "";
         let response = await fetch(root.dataset.pushUrl, {
           method: "POST",
-          headers: token ? { "X-Push-Token": token } : {},
+          headers: withCsrf(token ? { "X-Push-Token": token } : {}),
         });
         if (response.status === 401) {
           token = window.prompt("请输入推送 token") || "";
@@ -502,7 +504,7 @@
           window.sessionStorage.setItem("inktimePushToken", token);
           response = await fetch(root.dataset.pushUrl, {
             method: "POST",
-            headers: { "X-Push-Token": token },
+            headers: withCsrf({ "X-Push-Token": token }),
           });
         }
         const data = await response.json().catch(() => ({}));
@@ -530,7 +532,7 @@
       try {
         const response = await fetch(root.dataset.saveUrl, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
+          headers: withCsrf({ "Content-Type": "application/json" }),
           body: JSON.stringify({ custom_side_caption: input.value.trim() }),
         });
         const data = await response.json().catch(() => ({}));

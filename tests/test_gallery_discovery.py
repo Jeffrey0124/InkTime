@@ -114,6 +114,7 @@ def gallery_client(photo_rows, push_rows=()):
             app = server.create_app(
                 db_path=db_path,
                 render_output_dir=root / "renders",
+                auth_required=False,
             )
             yield app.test_client()
         finally:
@@ -126,7 +127,7 @@ def gallery_client(photo_rows, push_rows=()):
 
 
 def response_names(response):
-    return [Path(photo["path"]).stem for photo in response.get_json()["photos"]]
+    return [Path(photo["filename"]).stem for photo in response.get_json()["photos"]]
 
 
 class GalleryDiscoveryTests(unittest.TestCase):

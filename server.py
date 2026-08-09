@@ -10,10 +10,14 @@ import json
 import re
 import sqlite3
 import datetime as dt
+import secrets
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit
 
-from flask import Flask, abort, jsonify, redirect, request, send_file
+import click
+from flask import Flask, abort, g, jsonify, redirect, request, send_file, session
+from PIL import Image, ImageOps
 
 from photo_identity import ensure_photo_identity_schema
 from push_manager import (
@@ -27,6 +31,7 @@ from push_manager import (
 )
 from render_photopainter import render_from_database
 from web_queries import load_photo, load_photos, load_status
+from web_auth import WebAuth
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -159,6 +164,42 @@ def _short_path(value: Any) -> str:
     return text
 
 
+def _safe_next_url(value: Any, default: str = "/") -> str:
+    candidate = str(value or "").strip()
+    parsed = urlsplit(candidate)
+    if not candidate.startswith("/") or candidate.startswith("//") or parsed.netloc:
+        return default
+    return candidate
+
+
+def _public_photo(photo: dict[str, Any]) -> dict[str, Any]:
+    photo_id = int(photo["photo_id"])
+    hidden = {"path", "preview_png_path", "bmp_path"}
+    public = {key: value for key, value in photo.items() if key not in hidden}
+    public["filename"] = Path(str(photo.get("path") or "")).name
+    public["source_url"] = f"/media/previews/{photo_id}.jpg"
+    return public
+
+
+def _photo_api_response(photo: dict[str, Any]) -> dict[str, Any]:
+    response = _public_photo(photo)
+    if getattr(g, "is_admin", False):
+        response["source_url"] = str(photo.get("source_url") or "")
+    return response
+
+
+def _safe_manifest_response(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _safe_manifest_response(item)
+            for key, item in value.items()
+            if key != "path" and not key.endswith("_path")
+        }
+    if isinstance(value, list):
+        return [_safe_manifest_response(item) for item in value]
+    return value
+
+
 def _type_pills(value: Any) -> str:
     raw = str(value or "未分类")
     labels = [part.strip() for part in re.split(r"[/,，、\s]+", raw) if part.strip()]
@@ -197,15 +238,43 @@ def _display_location(item: dict[str, Any]) -> str:
 
 
 def _page(title: str, body: str, *, active: str = "dashboard") -> str:
+    is_admin = bool(getattr(g, "is_admin", True))
     active_dashboard = "active" if active == "dashboard" else ""
     active_gallery = "active" if active == "gallery" else ""
     active_studio = "active" if active == "studio" else ""
     active_settings = "active" if active == "settings" else ""
+    admin_navigation = f"""
+        <a class="{active_dashboard}" href="/">
+          <span class="nav-icon">⌂</span>
+          <span>中控台</span>
+        </a>
+        <a class="{active_studio}" href="/push-studio">
+          <span class="nav-icon">□</span>
+          <span>推送工作台</span>
+        </a>
+        <a class="{active_settings}" href="/settings">
+          <span class="nav-icon">◌</span>
+          <span>设置</span>
+        </a>
+    """ if is_admin else ""
+    csrf_token = str(session.get("csrf_token") or "")
+    session_action = (
+        f"""
+        <a href="/change-password"><span class="nav-icon">◎</span><span>账户</span></a>
+        <form class="nav-form" method="post" action="/logout">
+          <input type="hidden" name="csrf_token" value="{_esc(csrf_token)}">
+          <button type="submit"><span class="nav-icon">↪</span><span>退出登录</span></button>
+        </form>
+        """
+        if is_admin
+        else '<a href="/login"><span class="nav-icon">◎</span><span>管理员登录</span></a>'
+    )
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{_esc(csrf_token)}">
   <title>{html.escape(title)}</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -217,22 +286,12 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
         <span>InkTime</span>
       </a>
       <nav class="rail-nav">
-        <a class="{active_dashboard}" href="/">
-          <span class="nav-icon">⌂</span>
-          <span>中控台</span>
-        </a>
+        {admin_navigation}
         <a class="{active_gallery}" href="/gallery">
           <span class="nav-icon">▦</span>
           <span>画廊</span>
         </a>
-        <a class="{active_studio}" href="/push-studio">
-          <span class="nav-icon">□</span>
-          <span>推送工作台</span>
-        </a>
-        <a class="{active_settings}" href="/settings">
-          <span class="nav-icon">◌</span>
-          <span>设置</span>
-        </a>
+        {session_action}
       </nav>
       <div class="rail-note">
         <span class="status-dot"></span>
@@ -267,6 +326,8 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
       }};
       window.pushRender = async (renderId) => {{
         const headers = {{}};
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
+        if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
         const savedToken = sessionStorage.getItem("inktimePushToken");
         if (savedToken) headers["X-Push-Token"] = savedToken;
         let response = await fetch(`/api/push/manual/${{renderId}}`, {{ method: "POST", headers }});
@@ -276,7 +337,7 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
           sessionStorage.setItem("inktimePushToken", token);
           response = await fetch(`/api/push/manual/${{renderId}}`, {{
             method: "POST",
-            headers: {{ "X-Push-Token": token }}
+            headers: {{ "X-Push-Token": token, "X-CSRF-Token": csrfToken }}
           }});
         }}
         const data = await response.json().catch(() => ({{ ok: false, error: "响应解析失败" }}));
@@ -372,7 +433,7 @@ def _render_detail_page(manifest: dict[str, Any], item: dict[str, Any], item_id:
     side = _display_side_caption(item)
     caption = str(item.get("caption") or "")
     reason = str(item.get("reason") or "暂无评分理由。")
-    source_path = str(item.get("source_path") or "")
+    source_path = _short_path(item.get("source_path"))
     analysis_channel = str(item.get("analysis_channel") or "")
     analysis_model = str(item.get("analysis_model") or "")
     crop_focus = item.get("crop_focus")
@@ -475,7 +536,7 @@ def _render_review_page(rows: list[sqlite3.Row]) -> str:
         score = f"回忆 {_fmt_score(row['memory_score'])}<br>美观 {_fmt_score(row['beauty_score'])}"
         caption = _esc(row["side_caption"] or row["caption"])
         details = _esc(row["reason"])
-        source = _esc(row["path"])
+        source = _esc(_short_path(row["path"]))
         channel = _esc(row["analysis_channel"])
         body.append(
             f"<tr><td>{score}<br><span class='small'>{channel}</span></td><td><strong>{caption}</strong><br><span class='small'>{details}</span></td><td class='small'>{source}</td></tr>"
@@ -488,7 +549,11 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
     recent_push = status.get("recent_push") or {}
     preview_url = str(recent_push.get("preview_url") or "")
     recent_time = str(recent_push.get("pushed_at") or "暂无推送")
-    recent_caption = str(recent_push.get("side_caption") or recent_push.get("source_path") or "还没有设备成品")
+    recent_caption = str(
+        recent_push.get("side_caption")
+        or _short_path(recent_push.get("source_path"))
+        or "还没有设备成品"
+    )
     recent_photo_id = recent_push.get("photo_id")
     recent_studio_href = f"/push-studio/{_esc(recent_photo_id)}" if recent_photo_id else "/push-studio"
     state_label = "分析完成" if status.get("analyzed_photos") else "等待分析"
@@ -604,6 +669,7 @@ def _render_dashboard_page(status: dict[str, Any]) -> str:
 
 
 def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int) -> str:
+    can_manage = bool(getattr(g, "is_admin", True))
     sort_options = [
         ("score", "综合分最高"),
         ("date", "拍摄日期新到旧"),
@@ -643,10 +709,20 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
         prev_id = photo_ids[index - 1] if index > 0 and index - 1 < len(photo_ids) else photo_ids[-1]
         next_id = photo_ids[index + 1] if index + 1 < len(photo_ids) else photo_ids[0]
         shape = " tall" if index % 5 in {0, 4} else " wide" if index % 5 == 2 else ""
+        push_float = (
+            f'<a class="push-float" href="/push-studio/{_esc(photo_id)}">加入推送</a>'
+            if can_manage
+            else ""
+        )
+        push_entry = (
+            f'<a class="primary-button push-entry" href="/push-studio/{_esc(photo_id)}">进入推送工作台</a>'
+            if can_manage
+            else ""
+        )
         cards.append(
             f"""
             <article class="photo-card{shape}" tabindex="0">
-              <a class="push-float" href="/push-studio/{_esc(photo_id)}">加入推送</a>
+              {push_float}
               <a class="photo-image-link" href="#photo-{_esc(photo_id)}" aria-label="打开照片详情">
                 <img src="{_esc(photo.get("source_url"))}" alt="{_esc(photo.get("side_caption"))}" loading="lazy">
               </a>
@@ -690,7 +766,7 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
                       <strong>评分理由</strong>
                       <div class="muted">{_esc(photo.get("reason"))}</div>
                     </div>
-                    <a class="primary-button push-entry" href="/push-studio/{_esc(photo_id)}">进入推送工作台</a>
+                    {push_entry}
                   </aside>
                 </div>
               </div>
@@ -728,6 +804,7 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
 
 
 def _render_photo_database_detail(photo: dict[str, Any]) -> str:
+    can_manage = bool(getattr(g, "is_admin", True))
     meta = " · ".join(
         part
         for part in [
@@ -749,13 +826,30 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
     )
     ai_side_caption = str(photo.get("ai_side_caption") or "")
     custom_side_caption = str(photo.get("custom_side_caption") or "")
+    push_action = (
+        f'<a class="primary-button" href="/push-studio/{_esc(photo.get("photo_id"))}">进入推送工作台</a>'
+        if can_manage
+        else ""
+    )
+    caption_editor = (
+        f"""
+          <section class="detail-caption-editor" data-detail-caption-editor data-save-url="/api/photos/{_esc(photo.get('photo_id'))}/overrides">
+            <h3>文案微调</h3>
+            <p class="small"><strong>AI 原始短文案</strong><br>{_esc(ai_side_caption or '暂无')}</p>
+            <label class="field-stack"><span>人工文案</span><textarea rows="3" data-detail-caption-input>{_esc(custom_side_caption or ai_side_caption)}</textarea></label>
+            <div class="detail-caption-actions"><button class="button" type="button" data-detail-caption-save>保存文案</button><span class="small" data-detail-caption-state aria-live="polite">{_esc('已应用人工覆盖' if custom_side_caption else '当前使用 AI 文案')}</span></div>
+          </section>
+        """
+        if can_manage
+        else ""
+    )
     return f"""
     <section class="screen photo-detail-screen">
       <div class="detail-page-head">
         <span class="status-kicker">Photo #{_esc(photo.get("photo_id"))}</span>
         <div class="actions">
           <a class="button" href="/gallery">返回画廊</a>
-          <a class="primary-button" href="/push-studio/{_esc(photo.get("photo_id"))}">进入推送工作台</a>
+          {push_action}
         </div>
       </div>
       <section class="detail-grid">
@@ -782,12 +876,7 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
             <strong>评分理由</strong>
             <div class="muted">{_esc(photo.get("reason"))}</div>
           </div>
-          <section class="detail-caption-editor" data-detail-caption-editor data-save-url="/api/photos/{_esc(photo.get('photo_id'))}/overrides">
-            <h3>文案微调</h3>
-            <p class="small"><strong>AI 原始短文案</strong><br>{_esc(ai_side_caption or '暂无')}</p>
-            <label class="field-stack"><span>人工文案</span><textarea rows="3" data-detail-caption-input>{_esc(custom_side_caption or ai_side_caption)}</textarea></label>
-            <div class="detail-caption-actions"><button class="button" type="button" data-detail-caption-save>保存文案</button><span class="small" data-detail-caption-state aria-live="polite">{_esc('已应用人工覆盖' if custom_side_caption else '当前使用 AI 文案')}</span></div>
-          </section>
+          {caption_editor}
         </aside>
       </section>
     </section>
@@ -926,19 +1015,85 @@ def _render_settings_page() -> str:
     """
 
 
+def _render_login_page(*, csrf_token: str, next_url: str, configured: bool) -> str:
+    warning = "" if configured else "<p class='auth-warning'>尚未配置初始管理员密码，请先设置服务器环境变量。</p>"
+    return f"""
+    <section class="auth-screen" aria-labelledby="login-title">
+      <form class="auth-panel" method="post" action="/login">
+        <p class="eyebrow">Administrator</p>
+        <h2 id="login-title">管理员登录</h2>
+        <p>画廊可以只读浏览；配置、分析与推送操作需要管理员会话。</p>
+        {warning}
+        <input type="hidden" name="csrf_token" value="{_esc(csrf_token)}">
+        <input type="hidden" name="next" value="{_esc(next_url)}">
+        <label>密码<input name="password" type="password" minlength="8" autocomplete="current-password" required></label>
+        <button class="primary-button" type="submit">登录</button>
+      </form>
+    </section>
+    """
+
+
+def _render_change_password_page(*, csrf_token: str) -> str:
+    return f"""
+    <section class="auth-screen" aria-labelledby="password-title">
+      <form class="auth-panel" method="post" action="/change-password">
+        <p class="eyebrow">Security</p>
+        <h2 id="password-title">修改管理员密码</h2>
+        <p>首次登录必须设置新密码。新密码至少 8 个字符，修改后其他会话会立即失效。</p>
+        <input type="hidden" name="csrf_token" value="{_esc(csrf_token)}">
+        <label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label>
+        <label>新密码<input name="new_password" type="password" minlength="8" autocomplete="new-password" required></label>
+        <button class="primary-button" type="submit">保存新密码</button>
+      </form>
+    </section>
+    """
+
+
 def create_app(
     *,
     db_path: str | Path | None = None,
     render_output_dir: str | Path | None = None,
+    auth_required: bool | None = None,
+    initial_admin_password: str | None = None,
+    session_secret: str | None = None,
+    auth_cookie_secure: bool | None = None,
+    auth_now=None,
 ) -> Flask:
     app = Flask(__name__)
+    auth_enabled = True if auth_required is None else bool(auth_required)
     db = _resolve_path(db_path or _config_value("DB_PATH", "./photos.db"))
     render_dir = _resolve_path(
         render_output_dir or _config_value("RENDER_OUTPUT_DIR", "./output/photopainter")
     )
     push_dir = _resolve_path(_config_value("PUSH_OUTPUT_DIR", "./output/push"))
+    preview_dir = _resolve_path(
+        _config_value("DISPLAY_PREVIEW_DIR", "./output/previews")
+    )
     ensure_photo_identity_schema(db)
     ensure_push_schema(db)
+    auth = WebAuth(
+        db,
+        initial_password=(
+            str(_config_value("ADMIN_INITIAL_PASSWORD", "") or "")
+            if initial_admin_password is None
+            else initial_admin_password
+        ),
+        now=auth_now,
+    )
+    configured_session_secret = session_secret or str(
+        _config_value("SESSION_SECRET", "") or ""
+    )
+    app.secret_key = configured_session_secret or auth.persistent_session_secret()
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=(
+            bool(_config_value("AUTH_COOKIE_SECURE", False))
+            if auth_cookie_secure is None
+            else bool(auth_cookie_secure)
+        ),
+    )
+    app.extensions["web_auth"] = auth
 
     def push_token_error():
         token = str(_config_value("PUSH_API_TOKEN", "") or "")
@@ -946,13 +1101,187 @@ def create_app(
             return jsonify({"ok": False, "error": "推送 token 错误或缺失"}), 401
         return None
 
-    @app.get("/")
-    def index():
+    def web_status() -> dict[str, Any]:
         status = load_status(
             db,
             monitor_dir=_resolve_path(_config_value("IMAGE_DIR", "./sample_photos")),
             push_dir=push_dir,
         )
+        status["monitor_dir"] = _short_path(status.get("monitor_dir"))
+        recent_push = status.get("recent_push")
+        if isinstance(recent_push, dict):
+            recent_push.pop("source_path", None)
+            recent_push.pop("render_path", None)
+        return status
+
+    public_endpoints = {
+        "static",
+        "healthz",
+        "gallery",
+        "api_photos",
+        "api_photo_detail",
+        "photo_preview",
+        "photo_detail",
+        "push_static",
+        "login_page",
+        "login_submit",
+        "api_auth_session",
+        "api_auth_login",
+    }
+    password_endpoints = {
+        "change_password_page",
+        "change_password_submit",
+        "api_auth_change_password",
+        "api_auth_logout",
+        "logout_submit",
+        "api_auth_session",
+    }
+
+    @app.before_request
+    def enforce_auth_boundary():
+        if not auth_enabled:
+            g.is_admin = True
+            g.must_change_password = False
+            return None
+
+        state = auth.session_state()
+        g.is_admin = bool(state["authenticated"])
+        g.must_change_password = bool(state["must_change_password"])
+        endpoint = str(request.endpoint or "")
+        is_public = endpoint in public_endpoints
+        is_api = request.path.startswith("/api/")
+
+        if not g.is_admin and not is_public:
+            if is_api:
+                return jsonify({"ok": False, "error": "authentication_required"}), 401
+            next_url = request.full_path.rstrip("?") or "/"
+            return redirect(f"/login?next={quote(next_url, safe='/')}")
+
+        if g.is_admin and g.must_change_password and endpoint not in password_endpoints:
+            if is_api:
+                return jsonify({"ok": False, "error": "password_change_required"}), 403
+            return redirect("/change-password")
+
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            supplied = str(
+                request.headers.get("X-CSRF-Token")
+                or request.form.get("csrf_token")
+                or ""
+            )
+            expected = auth.csrf_token()
+            if not supplied or not secrets.compare_digest(supplied, expected):
+                return jsonify({"ok": False, "error": "csrf_failed"}), 400
+        return None
+
+    @app.get("/api/auth/session")
+    def api_auth_session():
+        state = auth.session_state()
+        return jsonify(
+            {
+                "ok": True,
+                **state,
+                "configured": auth.is_configured(),
+                "csrf_token": auth.csrf_token(),
+            }
+        )
+
+    @app.post("/api/auth/login")
+    def api_auth_login():
+        payload = request.get_json(silent=True) or {}
+        result, status = auth.login(
+            str(payload.get("password") or ""), request.remote_addr or "unknown"
+        )
+        return jsonify(result), status
+
+    @app.get("/login")
+    def login_page():
+        if g.is_admin and not g.must_change_password:
+            return redirect("/")
+        next_url = _safe_next_url(request.args.get("next"))
+        return _page(
+            "管理员登录",
+            _render_login_page(
+                csrf_token=auth.csrf_token(),
+                next_url=next_url,
+                configured=auth.is_configured(),
+            ),
+            active="",
+        )
+
+    @app.post("/login")
+    def login_submit():
+        next_url = _safe_next_url(request.form.get("next"))
+        result, status = auth.login(
+            str(request.form.get("password") or ""), request.remote_addr or "unknown"
+        )
+        if status != 200:
+            return _page(
+                "管理员登录",
+                _render_login_page(
+                    csrf_token=auth.csrf_token(),
+                    next_url=next_url,
+                    configured=auth.is_configured(),
+                ),
+                active="",
+            ), status
+        if result.get("must_change_password"):
+            return redirect("/change-password")
+        return redirect(next_url)
+
+    @app.get("/change-password")
+    def change_password_page():
+        return _page(
+            "修改管理员密码",
+            _render_change_password_page(csrf_token=auth.csrf_token()),
+            active="",
+        )
+
+    @app.post("/change-password")
+    def change_password_submit():
+        result, status = auth.change_password(
+            str(request.form.get("current_password") or ""),
+            str(request.form.get("new_password") or ""),
+        )
+        if status != 200:
+            return _page(
+                "修改管理员密码",
+                _render_change_password_page(csrf_token=auth.csrf_token()),
+                active="",
+            ), status
+        return redirect("/")
+
+    @app.post("/api/auth/change-password")
+    def api_auth_change_password():
+        payload = request.get_json(silent=True) or {}
+        result, status = auth.change_password(
+            str(payload.get("current_password") or ""),
+            str(payload.get("new_password") or ""),
+        )
+        return jsonify(result), status
+
+    @app.post("/api/auth/logout")
+    def api_auth_logout():
+        auth.clear_session()
+        return jsonify({"ok": True})
+
+    @app.post("/logout")
+    def logout_submit():
+        auth.clear_session()
+        return redirect("/gallery")
+
+    @app.cli.command("reset-admin-password")
+    @click.option("--password", prompt=True, hide_input=True, confirmation_prompt=True)
+    def reset_admin_password_command(password: str):
+        """Reset the administrator password and revoke existing sessions."""
+        try:
+            auth.reset_password(password)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo("管理员密码已重置；下次登录必须修改密码。")
+
+    @app.get("/")
+    def index():
+        status = web_status()
         return _page("InkTime 状态中控台", _render_dashboard_page(status), active="dashboard")
 
     @app.get("/healthz")
@@ -961,13 +1290,7 @@ def create_app(
 
     @app.get("/api/status")
     def api_status():
-        return jsonify(
-            load_status(
-                db,
-                monitor_dir=_resolve_path(_config_value("IMAGE_DIR", "./sample_photos")),
-                push_dir=push_dir,
-            )
-        )
+        return jsonify(web_status())
 
     @app.get("/gallery")
     def gallery():
@@ -976,14 +1299,17 @@ def create_app(
         today = dt.datetime.now(
             timezone_from_name(str(_config_value("PUSH_TIMEZONE", "Asia/Shanghai")))
         ).date()
-        photos = load_photos(
+        photos = [
+            _public_photo(photo)
+            for photo in load_photos(
             db,
             limit=limit,
             sort=sort,
             random_seed=request.args.get("seed"),
             exclude_days=int(_config_value("PUSH_EXCLUDE_DAYS", 90)),
             today=today,
-        )
+            )
+        ]
         return _page(
             "InkTime 画廊",
             _render_gallery_page(photos, sort=sort, limit=limit),
@@ -1001,15 +1327,18 @@ def create_app(
         return jsonify(
             {
                 "ok": True,
-                "photos": load_photos(
-                    db,
-                    limit=limit,
-                    sort=sort,
-                    include_missing=include_missing,
-                    random_seed=request.args.get("seed"),
-                    exclude_days=int(_config_value("PUSH_EXCLUDE_DAYS", 90)),
-                    today=today,
-                ),
+                "photos": [
+                    _photo_api_response(photo)
+                    for photo in load_photos(
+                        db,
+                        limit=limit,
+                        sort=sort,
+                        include_missing=include_missing,
+                        random_seed=request.args.get("seed"),
+                        exclude_days=int(_config_value("PUSH_EXCLUDE_DAYS", 90)),
+                        today=today,
+                    )
+                ],
             }
         )
 
@@ -1018,7 +1347,31 @@ def create_app(
         photo = load_photo(db, photo_id)
         if photo is None:
             abort(404)
-        return jsonify({"ok": True, "photo": photo})
+        return jsonify({"ok": True, "photo": _photo_api_response(photo)})
+
+    @app.get("/media/previews/<int:photo_id>.jpg")
+    def photo_preview(photo_id: int):
+        photo = load_photo(db, photo_id)
+        if photo is None or not photo.get("exists_on_disk"):
+            abort(404)
+        source = Path(str(photo.get("path") or "")).expanduser()
+        if not source.is_file():
+            abort(404)
+        try:
+            fingerprint = source.stat().st_mtime_ns
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            target = preview_dir / f"{photo_id}-{fingerprint}.jpg"
+            if not target.exists():
+                with Image.open(source) as image:
+                    display = ImageOps.exif_transpose(image).convert("RGB")
+                    display.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+                    display.save(target, format="JPEG", quality=86, optimize=True)
+                for stale in preview_dir.glob(f"{photo_id}-*.jpg"):
+                    if stale != target:
+                        stale.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            abort(404)
+        return send_file(target, mimetype="image/jpeg", max_age=3600)
 
     @app.get("/api/photos/<int:photo_id>/source")
     def photo_source(photo_id: int):
@@ -1118,16 +1471,27 @@ def create_app(
                 trigger_type="manual",
                 note=f"WebUI photo_id={photo_id}",
             )
-        except (FileNotFoundError, OSError, ValueError) as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
-        return jsonify({"ok": True, "photo_id": photo_id, "manifest": manifest})
+        except (FileNotFoundError, OSError, ValueError):
+            app.logger.warning("Photo publish failed for id=%s", photo_id)
+            return jsonify({"ok": False, "error": "设备成品生成失败"}), 400
+        return jsonify(
+            {
+                "ok": True,
+                "photo_id": photo_id,
+                "manifest": _safe_manifest_response(manifest),
+            }
+        )
 
     @app.get("/photos/<int:photo_id>")
     def photo_detail(photo_id: int):
         photo = load_photo(db, photo_id)
         if photo is None or not photo.get("exists_on_disk"):
             abort(404)
-        return _page("照片详情", _render_photo_database_detail(photo), active="gallery")
+        return _page(
+            "照片详情",
+            _render_photo_database_detail(_public_photo(photo)),
+            active="gallery",
+        )
 
     @app.get("/push-studio/<int:photo_id>")
     def push_studio(photo_id: int):
@@ -1188,6 +1552,12 @@ def create_app(
             abort(404)
         if not target.exists() or not target.is_file():
             abort(404)
+        if filename == "manifest.json":
+            try:
+                payload = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                abort(404)
+            return jsonify(_safe_manifest_response(payload))
         return send_file(target)
 
     @app.get("/source/<int:item_id>")
@@ -1250,13 +1620,16 @@ def create_app(
                 settings=settings,
                 trigger_type="manual",
             )
-        except IndexError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 404
-        except FileNotFoundError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 404
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"BMP 生成失败：{exc}"}), 500
-        return jsonify({"ok": True, **manifest})
+        except IndexError:
+            app.logger.warning("Render item was not found for id=%s", item_id)
+            return jsonify({"ok": False, "error": "未找到可推送的渲染记录"}), 404
+        except FileNotFoundError:
+            app.logger.warning("Render source was not found for id=%s", item_id)
+            return jsonify({"ok": False, "error": "推送所需素材不存在"}), 404
+        except Exception:
+            app.logger.warning("Render publish failed for id=%s", item_id)
+            return jsonify({"ok": False, "error": "设备成品生成失败"}), 500
+        return jsonify({"ok": True, **_safe_manifest_response(manifest)})
 
     return app
 

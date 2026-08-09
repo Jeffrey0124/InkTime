@@ -115,7 +115,11 @@ class ServerRoutesTests(unittest.TestCase):
             try:
                 server = importlib.import_module("server")
 
-                app = server.create_app(db_path=db_path, render_output_dir=render_dir)
+                app = server.create_app(
+                    db_path=db_path,
+                    render_output_dir=render_dir,
+                    auth_required=False,
+                )
                 client = app.test_client()
 
                 home = client.get("/")
@@ -188,6 +192,8 @@ class ServerRoutesTests(unittest.TestCase):
                 manifest = client.get("/push/manifest.json")
                 self.assertEqual(manifest.status_code, 200)
                 self.assertEqual(manifest.get_json()["image_url"], "/push/latest.bmp")
+                self.assertNotIn("source_path", manifest.get_json())
+                self.assertNotIn(str(root), manifest.get_data(as_text=True))
                 manifest.close()
 
                 status_after_push = client.get("/api/status")
@@ -351,7 +357,11 @@ class ServerRoutesTests(unittest.TestCase):
             try:
                 server = importlib.import_module("server")
 
-                app = server.create_app(db_path=db_path, render_output_dir=root / "renders")
+                app = server.create_app(
+                    db_path=db_path,
+                    render_output_dir=root / "renders",
+                    auth_required=False,
+                )
                 client = app.test_client()
 
                 status = client.get("/api/status")
@@ -373,7 +383,11 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertEqual(photo["exif_date"], "2026-04-04")
                 self.assertEqual(photo["exif_city"], "木渎镇")
                 self.assertEqual(photo["score"], 153.0)
-                self.assertIn(f"/api/photos/{photo['photo_id']}/source", photo["source_url"])
+                self.assertNotIn("path", photo)
+                self.assertEqual(
+                    photo["source_url"],
+                    f"/api/photos/{photo['photo_id']}/source",
+                )
                 photos.close()
 
                 detail_api = client.get(f"/api/photos/{photo['photo_id']}")
