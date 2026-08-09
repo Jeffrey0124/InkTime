@@ -19,6 +19,7 @@ from typing import Any
 from PIL import ExifTags, Image, ImageOps
 
 from photo_identity import ensure_photo_identity_schema
+from photo_fingerprint import content_fingerprint
 
 try:
     from pillow_heif import register_heif_opener
@@ -178,12 +179,15 @@ class LibraryScanner:
         seen: set[str] = set()
         now = _now()
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         try:
+            assets: list[dict[str, Any]] = []
             for path, relative in self._files() or ():
                 discovered += 1
                 absolute = str(path.resolve())
                 seen.add(absolute)
                 stat = path.stat()
+                fingerprint = content_fingerprint(path)
                 reason = None
                 try:
                     metadata = _extract_metadata(path)
@@ -202,17 +206,11 @@ class LibraryScanner:
                     file_status = "unreadable"
                     reason = type(exc).__name__
                     unreadable += 1
-                existing = conn.execute(
-                    "SELECT id, analysis_status, created_at FROM photos WHERE path = ?",
-                    (absolute,),
-                ).fetchone()
-                analysis_status = str(existing[1]) if existing else "pending"
-                status = "analyzed" if analysis_status == "analyzed" else file_status
                 asset = {
                     "path": absolute,
+                    "file_hash": fingerprint,
                     "size_bytes": stat.st_size,
                     "mtime": stat.st_mtime,
-                    "status": status,
                     "file_status": file_status,
                     "filename": path.name,
                     "relative_directory": (
@@ -231,34 +229,73 @@ class LibraryScanner:
                     "unreadable_reason": reason,
                     "now": now,
                 }
+                assets.append(asset)
+
+            tracked = conn.execute("SELECT * FROM photos").fetchall()
+            by_path = {str(row["path"]): row for row in tracked}
+            new_by_hash: dict[str, list[dict[str, Any]]] = {}
+            for asset in assets:
+                if asset["path"] not in by_path:
+                    new_by_hash.setdefault(str(asset["file_hash"]), []).append(asset)
+            tracked_by_hash: dict[str, list[sqlite3.Row]] = {}
+            for row in tracked:
+                if row["file_hash"]:
+                    tracked_by_hash.setdefault(str(row["file_hash"]), []).append(row)
+
+            for fingerprint, new_assets in new_by_hash.items():
+                old_assets = tracked_by_hash.get(fingerprint, [])
+                missing_old = [row for row in old_assets if str(row["path"]) not in seen]
+                if len(new_assets) != 1 or len(old_assets) != 1 or len(missing_old) != 1:
+                    continue
+                old = missing_old[0]
+                asset = new_assets[0]
+                old_path = str(old["path"])
+                conn.execute("UPDATE photos SET path=? WHERE id=?", (asset["path"], old["id"]))
+                for table, column in (("photo_scores", "path"), ("push_history", "source_path")):
+                    exists = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                    ).fetchone()
+                    if exists:
+                        conn.execute(
+                            f"UPDATE {table} SET {column}=? WHERE {column}=?",
+                            (asset["path"], old_path),
+                        )
+                by_path[asset["path"]] = old
+
+            for asset in assets:
+                existing = by_path.get(str(asset["path"]))
+                analysis_status = str(existing["analysis_status"]) if existing else "pending"
+                asset["status"] = "analyzed" if analysis_status == "analyzed" else asset["file_status"]
                 if existing:
                     conn.execute(
                         """
-                        UPDATE photos SET size_bytes=:size_bytes, mtime=:mtime,
-                          exists_on_disk=1, status=:status, file_status=:file_status,
-                          filename=:filename, relative_directory=:relative_directory,
+                        UPDATE photos SET file_hash=:file_hash, size_bytes=:size_bytes,
+                          mtime=:mtime, exists_on_disk=1, status=:status,
+                          file_status=:file_status, filename=:filename,
+                          relative_directory=:relative_directory,
                           file_extension=:file_extension, media_type=:media_type,
                           width=:width, height=:height, captured_at=:captured_at,
                           gps_lat=:gps_lat, gps_lon=:gps_lon, gps_alt=:gps_alt,
                           unreadable_reason=:unreadable_reason, updated_at=:now,
-                          missing_at=NULL
-                        WHERE path=:path
+                          missing_at=NULL, excluded_at=NULL
+                        WHERE id=:photo_id
                         """,
-                        asset,
+                        {**asset, "photo_id": int(existing["id"])},
                     )
                 else:
                     conn.execute(
                         """
                         INSERT INTO photos
-                        (path, size_bytes, mtime, exists_on_disk, status, file_status,
-                         analysis_status, visibility_status, filename, relative_directory,
-                         file_extension, media_type, width, height, captured_at, gps_lat,
-                         gps_lon, gps_alt, unreadable_reason, created_at, updated_at)
-                        VALUES (:path, :size_bytes, :mtime, 1, :status, :file_status,
-                                'pending', 'active', :filename, :relative_directory,
-                                :file_extension, :media_type, :width, :height,
-                                :captured_at, :gps_lat, :gps_lon, :gps_alt,
-                                :unreadable_reason, :now, :now)
+                        (path, file_hash, size_bytes, mtime, exists_on_disk, status,
+                         file_status, analysis_status, visibility_status, filename,
+                         relative_directory, file_extension, media_type, width, height,
+                         captured_at, gps_lat, gps_lon, gps_alt, unreadable_reason,
+                         created_at, updated_at)
+                        VALUES (:path, :file_hash, :size_bytes, :mtime, 1, :status,
+                                :file_status, 'pending', 'active', :filename,
+                                :relative_directory, :file_extension, :media_type,
+                                :width, :height, :captured_at, :gps_lat, :gps_lon,
+                                :gps_alt, :unreadable_reason, :now, :now)
                         """,
                         asset,
                     )
@@ -269,7 +306,20 @@ class LibraryScanner:
                 "SELECT id, path FROM photos WHERE path LIKE ?", (prefix + "%",)
             ).fetchall()
             for photo_id, raw_path in tracked:
-                if raw_path in seen or Path(raw_path).is_file():
+                if raw_path in seen:
+                    continue
+                path = Path(raw_path)
+                if path.is_file():
+                    relative = path.relative_to(self.root_path)
+                    if self._is_excluded(relative):
+                        conn.execute(
+                            """
+                            UPDATE photos SET exists_on_disk=1, status='excluded',
+                              file_status='excluded', updated_at=?, excluded_at=COALESCE(excluded_at, ?),
+                              missing_at=NULL WHERE id=?
+                            """,
+                            (now, now, photo_id),
+                        )
                     continue
                 missing += 1
                 conn.execute(

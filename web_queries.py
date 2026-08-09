@@ -225,6 +225,7 @@ def load_photos(
             return []
 
         score_columns = _columns(conn, "photo_scores")
+        photo_columns = _columns(conn, "photos")
         side_caption_expr = _optional_column(score_columns, "side_caption")
         exif_city_expr = _optional_column(score_columns, "exif_city")
         location_hint_expr = _optional_column(score_columns, "location_hint")
@@ -235,8 +236,15 @@ def load_photos(
         exif_gps_lat_expr = _optional_column(score_columns, "exif_gps_lat", "NULL")
         exif_gps_lon_expr = _optional_column(score_columns, "exif_gps_lon", "NULL")
         exif_gps_alt_expr = _optional_column(score_columns, "exif_gps_alt", "NULL")
-        where_clause = "WHERE p.id = ?" if photo_id is not None else ""
-        query_params = (photo_id,) if photo_id is not None else ()
+        where_clause = (
+            "WHERE p.visibility_status = 'active'"
+            if "visibility_status" in photo_columns
+            else "WHERE 1=1"
+        )
+        query_params: tuple[Any, ...] = ()
+        if photo_id is not None:
+            where_clause += " AND p.id = ?"
+            query_params = (photo_id,)
         has_push_history = _table_exists(conn, "push_history")
         push_history_join = """
             LEFT JOIN (
@@ -403,6 +411,7 @@ def load_library_assets(
     *,
     file_status: str = "",
     analysis_status: str = "",
+    visibility_status: str = "",
     captured_from: str = "",
     captured_to: str = "",
     has_gps: bool | None = None,
@@ -435,7 +444,13 @@ def load_library_assets(
             return {
                 "items": [],
                 "filtered_total": 0,
-                "summary": {"total": 0, "analyzable": 0, "file_status": {}, "analysis_status": {}},
+                "summary": {
+                    "total": 0,
+                    "analyzable": 0,
+                    "file_status": {},
+                    "analysis_status": {},
+                    "visibility_status": {},
+                },
             }
         summary = {
             "total": int(conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]),
@@ -460,6 +475,12 @@ def load_library_assets(
                     "SELECT analysis_status, COUNT(*) FROM photos GROUP BY analysis_status"
                 )
             },
+            "visibility_status": {
+                str(row[0]): int(row[1])
+                for row in conn.execute(
+                    "SELECT visibility_status, COUNT(*) FROM photos GROUP BY visibility_status"
+                )
+            },
         }
 
         clauses: list[str] = []
@@ -470,6 +491,9 @@ def load_library_assets(
         if analysis_status:
             clauses.append("p.analysis_status = ?")
             params.append(analysis_status)
+        if visibility_status:
+            clauses.append("p.visibility_status = ?")
+            params.append(visibility_status)
         if captured_from:
             clauses.append("p.captured_at >= ?")
             params.append(captured_from)
@@ -508,8 +532,9 @@ def load_library_assets(
             f"""
             SELECT p.id, p.filename, p.relative_directory, p.file_extension,
                    p.media_type, p.size_bytes, p.width, p.height, p.file_status,
-                   p.analysis_status, p.captured_at, p.gps_lat, p.gps_lon,
-                   p.created_at, COALESCE(av.photo_type, '') AS photo_type
+                   p.analysis_status, p.visibility_status, p.archived_at,
+                   p.captured_at, p.gps_lat, p.gps_lon, p.created_at,
+                   COALESCE(av.photo_type, '') AS photo_type
             {base}
             ORDER BY {sort_expression} {direction}, p.id {direction}
             LIMIT ? OFFSET ?
@@ -532,6 +557,8 @@ def load_library_assets(
                 "height": row["height"],
                 "file_status": row["file_status"],
                 "analysis_status": row["analysis_status"],
+                "visibility_status": row["visibility_status"],
+                "archived_at": row["archived_at"] or "",
                 "captured_at": row["captured_at"] or "",
                 "has_gps": row["gps_lat"] is not None and row["gps_lon"] is not None,
                 "type": row["photo_type"] or "",

@@ -108,6 +108,12 @@ def _ensure_photo_tables(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "photos", "gps_alt", "REAL")
     _ensure_column(conn, "photos", "unreadable_reason", "TEXT")
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photos_visibility ON photos(visibility_status, file_status)"
+    )
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS photo_overrides (
           photo_id INTEGER PRIMARY KEY,
