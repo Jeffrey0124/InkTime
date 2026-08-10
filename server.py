@@ -19,6 +19,7 @@ from urllib.parse import quote, urlsplit
 
 import click
 from flask import Flask, abort, g, jsonify, redirect, request, send_file, session
+from access_entries import entry_mode, normalize_entry_url, switch_url
 from asset_maintenance import AssetMaintenance
 
 from analysis_tasks import AnalysisTaskError, AnalysisTaskService
@@ -290,6 +291,11 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
         </a>
     """ if is_admin else ""
     csrf_token = str(session.get("csrf_token") or "")
+    entries = getattr(g, "access_entries", {})
+    switcher = ""
+    if entries.get("internal") and entries.get("external"):
+        mode = entries.get("mode")
+        switcher = f'''<div class="entry-switcher" aria-label="访问入口"><a class="{'active' if mode == 'internal' else ''}" href="{_esc(entries['internal_href'])}">内网</a><a class="{'active' if mode == 'external' else ''}" href="{_esc(entries['external_href'])}">外网</a></div>'''
     session_action = (
         f"""
         <a href="/change-password"><span class="nav-icon">◎</span><span>账户</span></a>
@@ -326,6 +332,7 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
         {session_action}
       </nav>
       <div class="rail-note">
+        {switcher}
         <span class="status-dot"></span>
         本地 WebUI<br>
         真实数据驱动
@@ -1292,6 +1299,8 @@ def _render_settings_page() -> str:
             <div class="settings-field-grid">
               <label class="toggle-field"><input name="audit_events" type="checkbox" checked> 记录配置变更事件</label>
               <label class="toggle-field"><input name="mask_paths" type="checkbox" checked> 页面隐藏完整路径</label>
+              <label>内网入口<input name="internal_entry_url" type="url" placeholder="http://192.168.x.x:8766"><button class="button" type="button" data-entry-test="internal_entry_url">测试打开</button></label>
+              <label>外网入口<input name="external_entry_url" type="url" placeholder="https://ink.example.com"><button class="button" type="button" data-entry-test="external_entry_url">测试打开</button></label>
             </div>
             <div class="settings-save-row"><button class="primary-button" type="submit">保存安全设置</button><span class="save-state" data-form-state></span></div>
           </form>
@@ -1518,6 +1527,18 @@ def create_app(
         status["unanalyzed_estimate"] = library_summary["analysis_status"].get("pending", 0)
         return status
 
+    def security_settings_default() -> dict[str, Any]:
+        return {
+            "audit_events": True,
+            "mask_paths": True,
+            "internal_entry_url": normalize_entry_url(_config_value("INKTIME_INTERNAL_ENTRY_URL", "")),
+            "external_entry_url": normalize_entry_url(_config_value("INKTIME_EXTERNAL_ENTRY_URL", "")),
+        }
+
+    def current_security_settings() -> dict[str, Any]:
+        stored = settings_store.get_section("security_settings")
+        return {**security_settings_default(), **stored["value"]}
+
     public_endpoints = {
         "static",
         "healthz",
@@ -1543,6 +1564,20 @@ def create_app(
 
     @app.before_request
     def enforce_auth_boundary():
+        security = current_security_settings()
+        internal = str(security.get("internal_entry_url") or "")
+        external = str(security.get("external_entry_url") or "")
+        try:
+            mode = entry_mode(request.url_root, internal, external)
+        except ValueError:
+            mode = None
+        g.access_entries = {
+            "internal": internal,
+            "external": external,
+            "mode": mode,
+            "internal_href": switch_url(internal, request.full_path.rstrip("?") or "/") if internal else "#",
+            "external_href": switch_url(external, request.full_path.rstrip("?") or "/") if external else "#",
+        }
         if not auth_enabled:
             g.is_admin = True
             g.must_change_password = False
@@ -2203,6 +2238,8 @@ def create_app(
             abort(404)
         key = section.replace("-", "_")
         result = settings_store.get_section(key)
+        if key == "security_settings":
+            result["value"] = current_security_settings()
         return jsonify({"ok": True, **result})
 
     @app.put("/api/settings/<section>")

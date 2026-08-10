@@ -1057,6 +1057,17 @@
       });
     });
 
+    root.querySelectorAll("[data-entry-test]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const input = root.querySelector(`[name="${button.dataset.entryTest}"]`);
+        try {
+          const url = new URL(input?.value || "");
+          if (!/^https?:$/.test(url.protocol) || url.pathname !== "/" || url.search || url.hash) throw new Error();
+          window.open(url.origin, "_blank", "noopener,noreferrer");
+        } catch { window.alert("请先填写完整的来源地址。") }
+      });
+    });
+
     await loadChannels();
   };
 

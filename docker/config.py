@@ -79,6 +79,8 @@ AUTH_COOKIE_SECURE = _str("INKTIME_AUTH_COOKIE_SECURE", "false").lower() in {
     "true",
     "yes",
 }
+INKTIME_INTERNAL_ENTRY_URL = _str("INKTIME_INTERNAL_ENTRY_URL", "")
+INKTIME_EXTERNAL_ENTRY_URL = _str("INKTIME_EXTERNAL_ENTRY_URL", "")
 DISPLAY_PREVIEW_DIR = "/data/output/previews"
 SCAN_ON_STARTUP = _str("SCAN_ON_STARTUP", "true").lower() not in {"0", "false", "no"}
 SCAN_INTERVAL_MINUTES = _int("SCAN_INTERVAL_MINUTES", 30)

@@ -132,6 +132,35 @@ class WebSettingsTests(unittest.TestCase):
         versions = self.client.get("/api/settings/versions/analysis_defaults").get_json()
         self.assertEqual([item["version"] for item in versions["versions"]], [2, 1])
 
+    def test_access_entries_validate_and_preserve_current_path_on_switch(self):
+        saved = self.client.put(
+            "/api/settings/security-settings",
+            json={
+                "audit_events": True,
+                "mask_paths": True,
+                "internal_entry_url": "http://192.168.31.115:8766/",
+                "external_entry_url": "https://ink.example.com",
+            },
+        )
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.get_json()["value"]["internal_entry_url"], "http://192.168.31.115:8766")
+
+        page = self.client.get(
+            "/gallery?sort=random",
+            base_url="http://192.168.31.115:8766",
+        )
+        html = page.get_data(as_text=True)
+        self.assertIn('entry-switcher', html)
+        self.assertIn('href="https://ink.example.com/gallery?sort=random"', html)
+        self.assertIn('href="http://192.168.31.115:8766/gallery?sort=random"', html)
+        self.assertNotIn("token=", html)
+
+        invalid = self.client.put(
+            "/api/settings/security-settings",
+            json={"internal_entry_url": "https://ink.example.com/gallery", "external_entry_url": "https://ink.example.com"},
+        )
+        self.assertEqual(invalid.status_code, 400)
+
     def test_unknown_diagnostic_kind_is_rejected(self):
         result, status = _dispatch_channel_diagnostic(
             self.app.extensions["settings_store"],
@@ -157,6 +186,8 @@ class WebSettingsTests(unittest.TestCase):
             self.assertIn(key, source)
         self.assertIn('id: `draft-${', source)
         self.assertIn('channel._draft ? "POST" : "PUT"', source)
+        self.assertIn("data-entry-test", (Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8"))
+        self.assertIn('window.open(url.origin, "_blank", "noopener,noreferrer")', source)
 
 
 if __name__ == "__main__":
