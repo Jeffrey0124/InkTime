@@ -226,12 +226,12 @@ def load_photos(
 
         score_columns = _columns(conn, "photo_scores")
         photo_columns = _columns(conn, "photos")
-        side_caption_expr = _optional_column(score_columns, "side_caption")
+        side_caption_expr = "s.side_caption" if "side_caption" in score_columns else "''"
         exif_city_expr = _optional_column(score_columns, "exif_city")
         location_hint_expr = _optional_column(score_columns, "location_hint")
-        analysis_channel_expr = _optional_column(score_columns, "analysis_channel")
-        analysis_model_expr = _optional_column(score_columns, "analysis_model")
-        crop_focus_expr = _optional_column(score_columns, "crop_focus_json")
+        analysis_channel_expr = "s.analysis_channel" if "analysis_channel" in score_columns else "''"
+        analysis_model_expr = "s.analysis_model" if "analysis_model" in score_columns else "''"
+        crop_focus_expr = "s.crop_focus_json" if "crop_focus_json" in score_columns else "''"
         exif_json_expr = _optional_column(score_columns, "exif_json")
         exif_gps_lat_expr = _optional_column(score_columns, "exif_gps_lat", "NULL")
         exif_gps_lon_expr = _optional_column(score_columns, "exif_gps_lon", "NULL")
@@ -246,6 +246,22 @@ def load_photos(
             where_clause += " AND p.id = ?"
             query_params = (photo_id,)
         has_push_history = _table_exists(conn, "push_history")
+        has_analysis_versions = _table_exists(conn, "analysis_versions")
+        current_version_id = (
+            "p.current_analysis_version_id"
+            if "current_analysis_version_id" in photo_columns
+            else "NULL"
+        )
+        current_caption = "COALESCE(av.caption, s.caption)" if has_analysis_versions else "s.caption"
+        current_type = "COALESCE(av.photo_type, s.type)" if has_analysis_versions else "s.type"
+        current_memory = "COALESCE(av.memory_score, s.memory_score)" if has_analysis_versions else "s.memory_score"
+        current_beauty = "COALESCE(av.beauty_score, s.beauty_score)" if has_analysis_versions else "s.beauty_score"
+        current_reason = "COALESCE(av.reason, s.reason)" if has_analysis_versions else "s.reason"
+        current_side_caption = f"COALESCE(av.side_caption, {side_caption_expr})" if has_analysis_versions else side_caption_expr
+        current_channel = f"COALESCE(av.analysis_channel, {analysis_channel_expr})" if has_analysis_versions else analysis_channel_expr
+        current_model = f"COALESCE(av.analysis_model, {analysis_model_expr})" if has_analysis_versions else analysis_model_expr
+        current_crop_focus = f"COALESCE(av.crop_focus_json, {crop_focus_expr})" if has_analysis_versions else crop_focus_expr
+        analysis_versions_join = "LEFT JOIN analysis_versions av ON av.id = p.current_analysis_version_id" if has_analysis_versions else ""
         push_history_join = """
             LEFT JOIN (
               SELECT source_path, MAX(pushed_at) AS last_pushed_at
@@ -262,25 +278,26 @@ def load_photos(
         rows = conn.execute(
             f"""
             SELECT p.id AS photo_id,
+                   {current_version_id} AS current_analysis_version_id,
                    p.path,
                    p.exists_on_disk,
                    p.status,
                    p.mtime,
-                   s.caption,
-                   s.type,
-                   s.memory_score,
-                   s.beauty_score,
-                   s.reason,
+                   {current_caption} AS caption,
+                   {current_type} AS type,
+                   {current_memory} AS memory_score,
+                   {current_beauty} AS beauty_score,
+                   {current_reason} AS reason,
                    {exif_json_expr},
                    {exif_gps_lat_expr},
                    {exif_gps_lon_expr},
                    {exif_gps_alt_expr},
-                   {side_caption_expr},
+                   {current_side_caption} AS side_caption,
                    {exif_city_expr},
                    {location_hint_expr},
-                   {analysis_channel_expr},
-                   {analysis_model_expr},
-                   {crop_focus_expr},
+                   {current_channel} AS analysis_channel,
+                   {current_model} AS analysis_model,
+                   {current_crop_focus} AS crop_focus_json,
                    o.custom_side_caption,
                    o.manual_crop_json,
                    o.render_overrides_json,
@@ -289,6 +306,7 @@ def load_photos(
                    {last_rendered_expr}
             FROM photos p
             JOIN photo_scores s ON s.path = p.path
+            {analysis_versions_join}
             LEFT JOIN photo_overrides o ON o.photo_id = p.id
             LEFT JOIN (
               SELECT photo_id,
@@ -321,6 +339,7 @@ def load_photos(
         photos.append(
             {
                 "photo_id": int(row["photo_id"]),
+                "current_analysis_version_id": row["current_analysis_version_id"],
                 "path": str(row["path"] or ""),
                 "source_url": f"/api/photos/{int(row['photo_id'])}/source",
                 "caption": caption,

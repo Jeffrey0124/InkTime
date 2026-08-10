@@ -336,6 +336,21 @@ def _ensure_notification_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _ensure_push_draft_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS push_drafts (
+          photo_id INTEGER PRIMARY KEY,
+          caption TEXT,
+          manual_crop_json TEXT,
+          render_overrides_json TEXT,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(photo_id) REFERENCES photos(id)
+        )
+        """
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read, created_at)"
     )
@@ -347,6 +362,7 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
     _ensure_scan_tables(conn)
     _ensure_model_tables(conn)
     _ensure_notification_tables(conn)
+    _ensure_push_draft_tables(conn)
 
 
 def _backfill_legacy_photo_states(conn: sqlite3.Connection) -> None:

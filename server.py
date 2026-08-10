@@ -23,6 +23,7 @@ from asset_maintenance import AssetMaintenance
 
 from analysis_tasks import AnalysisTaskError, AnalysisTaskService
 from analysis_worker import AnalysisWorker, AnalysisWorkerRunner, LegacyAnalysisExecutor
+from analysis_versions import AnalysisVersionError, AnalysisVersionService
 from notifications import NotificationStore
 from photo_identity import ensure_photo_identity_schema
 from model_provider import ModelProviderClient
@@ -1036,7 +1037,7 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
     """
 
 
-def _render_photo_database_detail(photo: dict[str, Any]) -> str:
+def _render_photo_database_detail(photo: dict[str, Any], versions: list[dict[str, Any]] | None = None) -> str:
     can_manage = bool(getattr(g, "is_admin", True))
     meta = " · ".join(
         part
@@ -1076,6 +1077,30 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
         if can_manage
         else ""
     )
+    version_rows = "".join(
+        f'<option value="{_esc(version["id"])}">v{_esc(version["version_number"])} · {_esc(version["analysis_channel"] or "-")} · {_esc(version["created_at"] or "-")}</option>'
+        for version in versions or []
+    )
+    current_version_id = photo.get("current_analysis_version_id")
+    version_summaries = "".join(
+        f'''<li class="analysis-version-summary{' is-current' if int(version['id']) == int(current_version_id or 0) else ''}">
+          <div><strong>v{_esc(version['version_number'])}{' · 当前' if int(version['id']) == int(current_version_id or 0) else ''}</strong><span>{_esc(version['analysis_channel'] or '-')} · {_esc(version['analysis_model'] or '-')} · {_esc(version['created_at'] or '-')}</span></div>
+          <p><strong>文案</strong>{_esc(version['side_caption'] or version['caption'] or '暂无')}</p>
+          <dl><div><dt>回忆度</dt><dd>{_esc(_fmt_score(version['memory_score']))}</dd></div><div><dt>美观度</dt><dd>{_esc(_fmt_score(version['beauty_score']))}</dd></div></dl>
+          <p><strong>理由</strong>{_esc(version['reason'] or '暂无')}</p>
+        </li>'''
+        for version in versions or []
+    )
+    versions_panel = (
+        f'''<section class="analysis-versions" data-analysis-versions data-photo-id="{_esc(photo.get("photo_id"))}">
+          <h3>分析版本</h3><p class="small">AI 结果与 EXIF 保持不可变；恢复只切换当前版本。</p>
+          <ol class="analysis-version-list">{version_summaries}</ol>
+          <div class="version-actions"><label>比较左侧<select data-version-left>{version_rows}</select></label><label>比较右侧<select data-version-right>{version_rows}</select></label><button class="button" type="button" data-version-compare>比较</button></div>
+          <div class="version-result" data-version-result aria-live="polite">选择两个版本查看差异。</div>
+          <div class="version-actions"><label>恢复版本<select data-version-restore>{version_rows}</select></label><button class="button" type="button" data-version-restore-button>恢复为当前版本</button></div>
+        </section>'''
+        if can_manage and versions else ""
+    )
     return f"""
     <section class="screen photo-detail-screen">
       <div class="detail-page-head">
@@ -1110,14 +1135,15 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
             <div class="muted">{_esc(photo.get("reason"))}</div>
           </div>
           {caption_editor}
+          {versions_panel}
         </aside>
       </section>
     </section>
     """
 
 
-def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
-    saved_crop = _json_object(photo.get("manual_crop_json"))
+def _render_push_studio_placeholder(photo: dict[str, Any], draft: dict[str, Any] | None = None) -> str:
+    saved_crop = _json_object((draft or photo).get("manual_crop_json"))
     crop = {
         "scale": 1.0,
         "offset_x": saved_crop.get("offset_x", saved_crop.get("x", 0)),
@@ -1137,9 +1163,9 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
         "brightness": float(_config_value("BRIGHTNESS", 1.1)),
         "contrast": float(_config_value("CONTRAST", 1.2)),
         "saturation": float(_config_value("SATURATION", 1.2)),
-        **normalize_render_overrides(photo.get("render_overrides_json")),
+        **normalize_render_overrides((draft or photo).get("render_overrides_json")),
     }
-    caption = str(photo.get("custom_side_caption") or photo.get("side_caption") or "")
+    caption = str((draft or {}).get("caption") or photo.get("custom_side_caption") or photo.get("side_caption") or "")
     exif_date = str(photo.get("exif_date") or "")
     exif_city = str(photo.get("exif_city") or "")
     meta = " · ".join(
@@ -1153,7 +1179,7 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
         if part
     )
     return f"""
-    <section class="screen studio-screen" data-push-studio data-display-defaults-version="2" data-photo-id="{_esc(photo.get("photo_id"))}" data-save-url="/api/photos/{_esc(photo.get("photo_id"))}/overrides" data-push-url="/api/photos/{_esc(photo.get("photo_id"))}/push" data-source-url="{_esc(photo.get("source_url"))}" data-crop="{_json_attr(crop)}" data-render="{_json_attr(render_overrides)}" data-date="{_esc(exif_date)}" data-location="{_esc(exif_city)}">
+    <section class="screen studio-screen" data-push-studio data-display-defaults-version="2" data-photo-id="{_esc(photo.get("photo_id"))}" data-save-url="/api/photos/{_esc(photo.get("photo_id"))}/push-draft" data-push-url="/api/photos/{_esc(photo.get("photo_id"))}/push" data-source-url="{_esc(photo.get("source_url"))}" data-crop="{_json_attr(crop)}" data-render="{_json_attr(render_overrides)}" data-date="{_esc(exif_date)}" data-location="{_esc(exif_city)}">
       <div class="studio-head">
         <div>
         <p class="status-kicker">Push Studio</p>
@@ -1384,6 +1410,7 @@ def create_app(
     )
     provider_client = model_provider or ModelProviderClient()
     analysis_task_service = AnalysisTaskService(db, settings_store)
+    analysis_version_service = AnalysisVersionService(db)
     notification_store = NotificationStore(db)
     auth = WebAuth(
         db,
@@ -1410,6 +1437,7 @@ def create_app(
     app.extensions["web_auth"] = auth
     app.extensions["settings_store"] = settings_store
     app.extensions["analysis_task_service"] = analysis_task_service
+    app.extensions["analysis_version_service"] = analysis_version_service
     app.extensions["notification_store"] = notification_store
     should_start_analysis_worker = (
         bool(_config_value("ANALYSIS_WORKER_ENABLED", True)) and db_path is None
@@ -1457,6 +1485,18 @@ def create_app(
         if token and request.headers.get("X-Push-Token", "") != token:
             return jsonify({"ok": False, "error": "推送 token 错误或缺失"}), 401
         return None
+
+    def load_push_draft(photo_id: int) -> dict[str, Any] | None:
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT caption, manual_crop_json, render_overrides_json FROM push_drafts WHERE photo_id=?",
+                (photo_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return dict(row) if row is not None else None
 
     def web_status() -> dict[str, Any]:
         status = load_status(
@@ -1963,6 +2003,51 @@ def create_app(
             }
         )
 
+    @app.get("/api/photos/<int:photo_id>/analysis-versions")
+    def api_analysis_versions(photo_id: int):
+        return jsonify({"ok": True, "versions": analysis_version_service.list(photo_id)})
+
+    @app.route("/api/photos/<int:photo_id>/push-draft", methods=["POST", "PATCH"])
+    def save_push_draft(photo_id: int):
+        if load_photo(db, photo_id) is None:
+            abort(404)
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+        caption = str(payload.get("custom_side_caption") or "").strip()
+        crop = _json_object(payload.get("manual_crop_json"))
+        render = _json_object(payload.get("render_overrides_json"))
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "INSERT INTO push_drafts(photo_id, caption, manual_crop_json, render_overrides_json, updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(photo_id) DO UPDATE SET caption=excluded.caption, manual_crop_json=excluded.manual_crop_json, render_overrides_json=excluded.render_overrides_json, updated_at=excluded.updated_at",
+                (photo_id, caption or None, json.dumps(crop, ensure_ascii=False, sort_keys=True), json.dumps(render, ensure_ascii=False, sort_keys=True), _utc_now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return jsonify({"ok": True, "photo_id": photo_id, "caption": caption})
+
+    @app.post("/api/photos/<int:photo_id>/analysis-versions/compare")
+    def api_analysis_versions_compare(photo_id: int):
+        payload = request.get_json(silent=True) or {}
+        try:
+            comparison = analysis_version_service.compare(
+                photo_id, int(payload.get("left_version_id")), int(payload.get("right_version_id"))
+            )
+        except (AnalysisVersionError, TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc) or "版本参数无效"}), 400
+        return jsonify({"ok": True, "comparison": comparison})
+
+    @app.post("/api/photos/<int:photo_id>/analysis-versions/<int:version_id>/restore")
+    def api_analysis_versions_restore(photo_id: int, version_id: int):
+        try:
+            restored = analysis_version_service.restore(photo_id, version_id)
+        except AnalysisVersionError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        return jsonify({"ok": True, **restored})
+
     @app.post("/api/photos/<int:photo_id>/push")
     def push_photo(photo_id: int):
         auth_error = push_token_error()
@@ -1972,10 +2057,14 @@ def create_app(
         if photo is None or not photo.get("exists_on_disk"):
             abort(404)
         item = dict(photo)
+        draft = load_push_draft(photo_id)
         item["source_path"] = str(photo.get("path") or "")
         item["side_caption"] = str(
-            photo.get("custom_side_caption") or photo.get("side_caption") or ""
+            (draft["caption"] if draft and draft["caption"] else photo.get("custom_side_caption")) or photo.get("side_caption") or ""
         )
+        if draft is not None:
+            item["manual_crop_json"] = draft["manual_crop_json"] or ""
+            item["render_overrides_json"] = draft["render_overrides_json"] or ""
         item["crop_focus"] = _json_object(photo.get("crop_focus_json"))
         settings = settings_from_config(
             db_path=db,
@@ -2007,7 +2096,7 @@ def create_app(
             abort(404)
         return _page(
             "照片详情",
-            _render_photo_database_detail(_public_photo(photo)),
+            _render_photo_database_detail(_public_photo(photo), analysis_version_service.list(photo_id)),
             active="gallery",
         )
 
@@ -2016,7 +2105,11 @@ def create_app(
         photo = load_photo(db, photo_id)
         if photo is None or not photo.get("exists_on_disk"):
             abort(404)
-        return _page("单张推送工作台", _render_push_studio_placeholder(photo), active="studio")
+        return _page(
+            "单张推送工作台",
+            _render_push_studio_placeholder(photo, load_push_draft(photo_id)),
+            active="studio",
+        )
 
     @app.get("/push-studio")
     def push_studio_index():

@@ -546,6 +546,43 @@
     });
   };
 
+  const initAnalysisVersions = (root) => {
+    const photoId = root.dataset.photoId;
+    const left = root.querySelector("[data-version-left]");
+    const right = root.querySelector("[data-version-right]");
+    const restore = root.querySelector("[data-version-restore]");
+    const result = root.querySelector("[data-version-result]");
+    const fieldNames = {
+      caption: "描述",
+      side_caption: "短文案",
+      photo_type: "类型",
+      memory_score: "回忆度",
+      beauty_score: "美观度",
+      reason: "评分理由",
+      analysis_channel: "分析通道",
+      analysis_model: "模型",
+      created_at: "分析时间",
+    };
+    const requestJson = async (url, body) => {
+      const response = await fetch(url, { method: "POST", headers: withCsrf({ "Content-Type": "application/json" }), body: JSON.stringify(body) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || response.statusText);
+      return data;
+    };
+    root.querySelector("[data-version-compare]")?.addEventListener("click", async () => {
+      try {
+        const data = await requestJson(`/api/photos/${photoId}/analysis-versions/compare`, { left_version_id: Number(left.value), right_version_id: Number(right.value) });
+        result.textContent = Object.entries(data.comparison).filter(([, value]) => value.left !== value.right).map(([field, value]) => `${fieldNames[field] || field}: ${value.left ?? "-"} -> ${value.right ?? "-"}`).join("；") || "两个版本没有关键字段差异。";
+      } catch (error) { result.textContent = `比较失败：${error.message}`; }
+    });
+    root.querySelector("[data-version-restore-button]")?.addEventListener("click", async () => {
+      try {
+        await requestJson(`/api/photos/${photoId}/analysis-versions/${Number(restore.value)}/restore`, {});
+        window.location.reload();
+      } catch (error) { result.textContent = `恢复失败：${error.message}`; }
+    });
+  };
+
   const initDashboardLog = (button) => {
     const listId = button.getAttribute("aria-controls");
     const list = listId ? document.getElementById(listId) : null;
@@ -1026,6 +1063,7 @@
   document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll("[data-push-studio]").forEach(initPushStudio);
     document.querySelectorAll("[data-detail-caption-editor]").forEach(initDetailCaptionEditor);
+    document.querySelectorAll("[data-analysis-versions]").forEach(initAnalysisVersions);
     document.querySelectorAll("[data-log-toggle]").forEach(initDashboardLog);
     document.querySelectorAll("[data-library-selection]").forEach(initLibrarySelection);
     document.querySelectorAll("[data-task-center]").forEach(initTaskCenter);
