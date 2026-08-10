@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import random
 import sqlite3
@@ -92,8 +93,10 @@ def _count_monitor_files(monitor_dir: Path) -> int:
             for path in monitor_dir.rglob("*")
             if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
         )
-    except OSError:
-        return 0
+    except OSError as exc:
+        if exc.errno in {errno.ESTALE, 116}:
+            return 0
+        raise
 
 
 def _load_push_manifest(push_dir: Path) -> dict[str, Any]:

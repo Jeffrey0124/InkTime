@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
-from unittest.mock import patch
 
 from web_queries import load_photo
 
@@ -15,6 +14,13 @@ class WebLocationTests(unittest.TestCase):
 
         with patch.object(Path, "exists", side_effect=OSError(116, "Stale file handle")):
             self.assertEqual(_count_monitor_files(Path("/photos")), 0)
+
+    def test_non_stale_monitor_errors_are_not_hidden(self):
+        from web_queries import _count_monitor_files
+
+        with patch.object(Path, "exists", side_effect=PermissionError(13, "denied")):
+            with self.assertRaises(PermissionError):
+                _count_monitor_files(Path("/photos"))
 
     def test_load_photo_hydrates_location_without_writing_during_get(self):
         with TemporaryDirectory() as tmp:
