@@ -23,7 +23,7 @@ def run_scheduled_push(slot: str) -> None:
     manifest = publish_scheduled(slot=slot)
     print(
         f"[OK] 已自动推送 {manifest['image_url']} "
-        f"slot={slot} source={manifest.get('source_path', '')}"
+        f"slot={slot}"
     )
 
 

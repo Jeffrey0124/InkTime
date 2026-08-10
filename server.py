@@ -2111,6 +2111,7 @@ def create_app(
                 item,
                 settings=settings,
                 trigger_type="manual",
+                apply_saved_overrides=False,
                 note=f"WebUI photo_id={photo_id}",
             )
         except (FileNotFoundError, OSError, ValueError):

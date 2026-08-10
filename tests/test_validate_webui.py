@@ -34,6 +34,7 @@ class _ValidationHandler(BaseHTTPRequestHandler):
     bmp_size = (800, 480)
     extra_color = None
     requested_paths = []
+    redirect_management = False
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -59,7 +60,11 @@ class _ValidationHandler(BaseHTTPRequestHandler):
             )
         elif path == "/push/latest.png":
             self._send("image/png", b"png-preview")
-        elif path in {"/", "/gallery", "/photos/7", "/push-studio/7"}:
+        elif type(self).redirect_management and path in {"/", "/library", "/analysis-tasks", "/push-studio/7"}:
+            self.send_response(302)
+            self.send_header("Location", f"/login?next={path}")
+            self.end_headers()
+        elif path in {"/", "/gallery", "/library", "/analysis-tasks", "/photos/7", "/push-studio/7"}:
             self._send("text/html; charset=utf-8", b"<html>InkTime</html>")
         else:
             self.send_error(404)
@@ -82,8 +87,9 @@ class ValidateWebUITests(unittest.TestCase):
         _ValidationHandler.bmp_size = (800, 480)
         _ValidationHandler.extra_color = None
         _ValidationHandler.requested_paths = []
+        _ValidationHandler.redirect_management = False
 
-    def _run_cli(self):
+    def _run_cli(self, *extra_args):
         server = ThreadingHTTPServer(("127.0.0.1", 0), _ValidationHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -94,6 +100,7 @@ class ValidateWebUITests(unittest.TestCase):
                     "scripts/validate_webui.py",
                     "--base-url",
                     f"http://127.0.0.1:{server.server_port}",
+                    *extra_args,
                 ],
                 cwd=ROOT_DIR,
                 capture_output=True,
@@ -112,6 +119,8 @@ class ValidateWebUITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS: WebUI routes and push artifact", result.stdout)
         self.assertIn("/api/photos?limit=1", _ValidationHandler.requested_paths)
+        self.assertIn("/library", _ValidationHandler.requested_paths)
+        self.assertIn("/analysis-tasks", _ValidationHandler.requested_paths)
         self.assertIn("/photos/7", _ValidationHandler.requested_paths)
         self.assertIn("/push-studio/7", _ValidationHandler.requested_paths)
 
@@ -129,6 +138,20 @@ class ValidateWebUITests(unittest.TestCase):
                 result = self._run_cli()
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(message, result.stderr)
+
+    def test_cli_validates_login_redirects_without_following_them(self):
+        _ValidationHandler.redirect_management = True
+
+        result = self._run_cli("--expect-auth")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"auth_boundary": "required"', result.stdout)
+
+    def test_cli_rejects_unprotected_management_routes_when_auth_is_expected(self):
+        result = self._run_cli("--expect-auth")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("did not redirect to /login", result.stderr)
 
 
 if __name__ == "__main__":

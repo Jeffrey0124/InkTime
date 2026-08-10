@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import random
 import sqlite3
@@ -84,13 +85,18 @@ def _is_not_recent(last_rendered_at: Any, cutoff: date) -> bool:
 
 
 def _count_monitor_files(monitor_dir: Path) -> int:
-    if not monitor_dir.exists() or not monitor_dir.is_dir():
-        return 0
-    return sum(
-        1
-        for path in monitor_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-    )
+    try:
+        if not monitor_dir.exists() or not monitor_dir.is_dir():
+            return 0
+        return sum(
+            1
+            for path in monitor_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        )
+    except OSError as exc:
+        if exc.errno in {errno.ESTALE, 116}:
+            return 0
+        raise
 
 
 def _load_push_manifest(push_dir: Path) -> dict[str, Any]:
