@@ -552,6 +552,17 @@
     const right = root.querySelector("[data-version-right]");
     const restore = root.querySelector("[data-version-restore]");
     const result = root.querySelector("[data-version-result]");
+    const fieldNames = {
+      caption: "描述",
+      side_caption: "短文案",
+      photo_type: "类型",
+      memory_score: "回忆度",
+      beauty_score: "美观度",
+      reason: "评分理由",
+      analysis_channel: "分析通道",
+      analysis_model: "模型",
+      created_at: "分析时间",
+    };
     const requestJson = async (url, body) => {
       const response = await fetch(url, { method: "POST", headers: withCsrf({ "Content-Type": "application/json" }), body: JSON.stringify(body) });
       const data = await response.json().catch(() => ({}));
@@ -561,7 +572,7 @@
     root.querySelector("[data-version-compare]")?.addEventListener("click", async () => {
       try {
         const data = await requestJson(`/api/photos/${photoId}/analysis-versions/compare`, { left_version_id: Number(left.value), right_version_id: Number(right.value) });
-        result.textContent = Object.entries(data.comparison).filter(([, value]) => value.left !== value.right).map(([field, value]) => `${field}: ${value.left ?? "-"} -> ${value.right ?? "-"}`).join("；") || "两个版本没有关键字段差异。";
+        result.textContent = Object.entries(data.comparison).filter(([, value]) => value.left !== value.right).map(([field, value]) => `${fieldNames[field] || field}: ${value.left ?? "-"} -> ${value.right ?? "-"}`).join("；") || "两个版本没有关键字段差异。";
       } catch (error) { result.textContent = `比较失败：${error.message}`; }
     });
     root.querySelector("[data-version-restore-button]")?.addEventListener("click", async () => {

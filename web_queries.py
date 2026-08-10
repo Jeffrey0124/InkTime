@@ -247,6 +247,11 @@ def load_photos(
             query_params = (photo_id,)
         has_push_history = _table_exists(conn, "push_history")
         has_analysis_versions = _table_exists(conn, "analysis_versions")
+        current_version_id = (
+            "p.current_analysis_version_id"
+            if "current_analysis_version_id" in photo_columns
+            else "NULL"
+        )
         current_caption = "COALESCE(av.caption, s.caption)" if has_analysis_versions else "s.caption"
         current_type = "COALESCE(av.photo_type, s.type)" if has_analysis_versions else "s.type"
         current_memory = "COALESCE(av.memory_score, s.memory_score)" if has_analysis_versions else "s.memory_score"
@@ -273,6 +278,7 @@ def load_photos(
         rows = conn.execute(
             f"""
             SELECT p.id AS photo_id,
+                   {current_version_id} AS current_analysis_version_id,
                    p.path,
                    p.exists_on_disk,
                    p.status,
@@ -333,6 +339,7 @@ def load_photos(
         photos.append(
             {
                 "photo_id": int(row["photo_id"]),
+                "current_analysis_version_id": row["current_analysis_version_id"],
                 "path": str(row["path"] or ""),
                 "source_url": f"/api/photos/{int(row['photo_id'])}/source",
                 "caption": caption,

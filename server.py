@@ -1081,9 +1081,20 @@ def _render_photo_database_detail(photo: dict[str, Any], versions: list[dict[str
         f'<option value="{_esc(version["id"])}">v{_esc(version["version_number"])} · {_esc(version["analysis_channel"] or "-")} · {_esc(version["created_at"] or "-")}</option>'
         for version in versions or []
     )
+    current_version_id = photo.get("current_analysis_version_id")
+    version_summaries = "".join(
+        f'''<li class="analysis-version-summary{' is-current' if int(version['id']) == int(current_version_id or 0) else ''}">
+          <div><strong>v{_esc(version['version_number'])}{' · 当前' if int(version['id']) == int(current_version_id or 0) else ''}</strong><span>{_esc(version['analysis_channel'] or '-')} · {_esc(version['analysis_model'] or '-')} · {_esc(version['created_at'] or '-')}</span></div>
+          <p><strong>文案</strong>{_esc(version['side_caption'] or version['caption'] or '暂无')}</p>
+          <dl><div><dt>回忆度</dt><dd>{_esc(_fmt_score(version['memory_score']))}</dd></div><div><dt>美观度</dt><dd>{_esc(_fmt_score(version['beauty_score']))}</dd></div></dl>
+          <p><strong>理由</strong>{_esc(version['reason'] or '暂无')}</p>
+        </li>'''
+        for version in versions or []
+    )
     versions_panel = (
         f'''<section class="analysis-versions" data-analysis-versions data-photo-id="{_esc(photo.get("photo_id"))}">
           <h3>分析版本</h3><p class="small">AI 结果与 EXIF 保持不可变；恢复只切换当前版本。</p>
+          <ol class="analysis-version-list">{version_summaries}</ol>
           <div class="version-actions"><label>比较左侧<select data-version-left>{version_rows}</select></label><label>比较右侧<select data-version-right>{version_rows}</select></label><button class="button" type="button" data-version-compare>比较</button></div>
           <div class="version-result" data-version-result aria-live="polite">选择两个版本查看差异。</div>
           <div class="version-actions"><label>恢复版本<select data-version-restore>{version_rows}</select></label><button class="button" type="button" data-version-restore-button>恢复为当前版本</button></div>
@@ -1131,8 +1142,8 @@ def _render_photo_database_detail(photo: dict[str, Any], versions: list[dict[str
     """
 
 
-def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
-    saved_crop = _json_object(photo.get("manual_crop_json"))
+def _render_push_studio_placeholder(photo: dict[str, Any], draft: dict[str, Any] | None = None) -> str:
+    saved_crop = _json_object((draft or photo).get("manual_crop_json"))
     crop = {
         "scale": 1.0,
         "offset_x": saved_crop.get("offset_x", saved_crop.get("x", 0)),
@@ -1152,9 +1163,9 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
         "brightness": float(_config_value("BRIGHTNESS", 1.1)),
         "contrast": float(_config_value("CONTRAST", 1.2)),
         "saturation": float(_config_value("SATURATION", 1.2)),
-        **normalize_render_overrides(photo.get("render_overrides_json")),
+        **normalize_render_overrides((draft or photo).get("render_overrides_json")),
     }
-    caption = str(photo.get("custom_side_caption") or photo.get("side_caption") or "")
+    caption = str((draft or {}).get("caption") or photo.get("custom_side_caption") or photo.get("side_caption") or "")
     exif_date = str(photo.get("exif_date") or "")
     exif_city = str(photo.get("exif_city") or "")
     meta = " · ".join(
@@ -1474,6 +1485,18 @@ def create_app(
         if token and request.headers.get("X-Push-Token", "") != token:
             return jsonify({"ok": False, "error": "推送 token 错误或缺失"}), 401
         return None
+
+    def load_push_draft(photo_id: int) -> dict[str, Any] | None:
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT caption, manual_crop_json, render_overrides_json FROM push_drafts WHERE photo_id=?",
+                (photo_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return dict(row) if row is not None else None
 
     def web_status() -> dict[str, Any]:
         status = load_status(
@@ -2034,12 +2057,7 @@ def create_app(
         if photo is None or not photo.get("exists_on_disk"):
             abort(404)
         item = dict(photo)
-        conn = sqlite3.connect(db)
-        conn.row_factory = sqlite3.Row
-        try:
-            draft = conn.execute("SELECT caption, manual_crop_json, render_overrides_json FROM push_drafts WHERE photo_id=?", (photo_id,)).fetchone()
-        finally:
-            conn.close()
+        draft = load_push_draft(photo_id)
         item["source_path"] = str(photo.get("path") or "")
         item["side_caption"] = str(
             (draft["caption"] if draft and draft["caption"] else photo.get("custom_side_caption")) or photo.get("side_caption") or ""
@@ -2087,7 +2105,11 @@ def create_app(
         photo = load_photo(db, photo_id)
         if photo is None or not photo.get("exists_on_disk"):
             abort(404)
-        return _page("单张推送工作台", _render_push_studio_placeholder(photo), active="studio")
+        return _page(
+            "单张推送工作台",
+            _render_push_studio_placeholder(photo, load_push_draft(photo_id)),
+            active="studio",
+        )
 
     @app.get("/push-studio")
     def push_studio_index():
