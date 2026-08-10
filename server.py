@@ -23,6 +23,7 @@ from asset_maintenance import AssetMaintenance
 
 from analysis_tasks import AnalysisTaskError, AnalysisTaskService
 from analysis_worker import AnalysisWorker, AnalysisWorkerRunner, LegacyAnalysisExecutor
+from notifications import NotificationStore
 from photo_identity import ensure_photo_identity_schema
 from model_provider import ModelProviderClient
 from library_scanner import LibraryScanner, PeriodicScanScheduler, ScanCoordinator
@@ -64,6 +65,13 @@ def _resolve_path(path: str | Path, *, base: Path = ROOT_DIR) -> Path:
 
 def _config_value(name: str, default: Any) -> Any:
     return getattr(cfg, name, default)
+
+
+def _safe_task_error(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)(api[_ -]?key|token|password)\s*[=:]\s*\S+", "[已隐藏]", text)
+    text = re.sub(r"(?i)[a-z]:[/\\][^\s]+", "[本地路径]", text)
+    return text[:240]
 
 
 def _load_manifest(render_output_dir: Path) -> dict[str, Any]:
@@ -257,6 +265,7 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
     active_studio = "active" if active == "studio" else ""
     active_settings = "active" if active == "settings" else ""
     active_library = "active" if active == "library" else ""
+    active_tasks = "active" if active == "tasks" else ""
     admin_navigation = f"""
         <a class="{active_dashboard}" href="/">
           <span class="nav-icon">⌂</span>
@@ -269,6 +278,10 @@ def _page(title: str, body: str, *, active: str = "dashboard") -> str:
         <a class="{active_library}" href="/library">
           <span class="nav-icon">▤</span>
           <span>素材库</span>
+        </a>
+        <a class="{active_tasks}" href="/analysis-tasks">
+          <span class="nav-icon">◫</span>
+          <span>分析任务</span>
         </a>
         <a class="{active_settings}" href="/settings">
           <span class="nav-icon">◌</span>
@@ -778,7 +791,7 @@ def _render_library_page(payload: dict[str, Any], filters: dict[str, str]) -> st
     """
 
 
-def _render_analysis_task_page(task: dict[str, Any]) -> str:
+def _render_analysis_task_page(task: dict[str, Any], items: list[dict[str, Any]]) -> str:
     mode = "重新分析" if task["task_type"] == "reanalysis" else "增量分析"
     progress_heading = "任务已进入队列" if task["status"] == "queued" else "任务执行进度"
     task_id = int(task["task_id"])
@@ -831,15 +844,59 @@ def _render_analysis_task_page(task: dict[str, Any]) -> str:
         f"<li><span>{index + 1}</span><strong>{_esc(item['channel_name'])}</strong><small>{_esc(item['model_id'])} · v{_esc(item['channel_version'])}</small></li>"
         for index, item in enumerate(task["strategy"].get("execution_levels") or [])
     )
+    item_rows = "".join(
+        f"""<tr data-task-item-status="{_esc(item['status'])}"><td>{_esc(item['filename'])}</td>
+        <td>{_esc(item['status'])}</td><td>{_esc(str(item.get('current_execution_level') or '-'))}</td>
+        <td>{_esc(str(item.get('attempt_count') or 0))}</td><td>{_esc(str(item.get('duration_seconds')) if item.get('duration_seconds') is not None else '-')} 秒</td>
+        <td>{_esc(item.get('error_message') or '-')}</td></tr>"""
+        for item in items
+    ) or '<tr><td colspan="7">暂无任务素材。</td></tr>'
     return f"""
-    <section class="screen analysis-task-screen" aria-labelledby="analysis-task-title">
+    <section class="screen analysis-task-screen" data-task-detail data-task-id="{task_id}" aria-labelledby="analysis-task-title">
       <div class="section-heading"><div><p class="kicker">Analysis Task</p><h2 id="analysis-task-title">{_esc(task['name'])}</h2></div><a class="button" href="/library">返回素材库</a></div>
       <section class="task-created-panel">
-        <div><span class="state-label">{_esc(task['status'])}</span><h3>{_esc(progress_heading)}</h3><p>{_esc(mode)} · {_esc(str(task['total_count']))} 张 · 并发 {_esc(str(task['concurrency']))} · 当前 {_esc(task.get('current_filename') or '等待领取')}</p></div>
-        <dl><div><dt>已处理</dt><dd>{_esc(str(task['processed_count']))}</dd></div><div><dt>成功</dt><dd>{_esc(str(task['succeeded_count']))}</dd></div><div><dt>失败</dt><dd>{_esc(str(task['failed_count']))}</dd></div><div><dt>剩余</dt><dd>{_esc(str(task['remaining_count']))}</dd></div></dl>
+        <div><span class="state-label" data-task-status>{_esc(task['status'])}</span><h3>{_esc(progress_heading)}</h3><p data-task-summary>{_esc(mode)} · {_esc(str(task['total_count']))} 张 · 并发 {_esc(str(task['concurrency']))} · 当前 {_esc(task.get('current_filename') or '等待领取')}</p></div>
+        <dl><div><dt>已处理</dt><dd data-task-count="processed_count">{_esc(str(task['processed_count']))}</dd></div><div><dt>成功</dt><dd data-task-count="succeeded_count">{_esc(str(task['succeeded_count']))}</dd></div><div><dt>失败</dt><dd data-task-count="failed_count">{_esc(str(task['failed_count']))}</dd></div><div><dt>剩余</dt><dd data-task-count="remaining_count">{_esc(str(task['remaining_count']))}</dd></div></dl>
       </section>
+      <p class="task-sync-state" data-task-sync-state aria-live="polite">数据每 2 秒更新</p>
       {controls}
+      <section class="task-items-panel"><div class="section-heading compact-heading"><div><p class="kicker">Task Items</p><h3>素材处理明细</h3></div><label>筛选<select data-task-item-filter><option value="all">全部</option><option value="completed">成功</option><option value="failed">失败</option><option value="queued">未处理</option></select></label></div>
+        <div class="task-item-table-wrap"><table><thead><tr><th>照片</th><th>状态</th><th>模型层级</th><th>尝试</th><th>耗时</th><th>说明</th></tr></thead><tbody data-task-item-list>{item_rows}</tbody></table></div>
+      </section>
       <section class="task-strategy-panel"><p class="kicker">Frozen Strategy</p><h3>模型执行策略</h3><ol>{levels}</ol><p>该任务已冻结素材集合和非敏感模型配置；凭据将在 Worker 执行时读取。</p></section>
+    </section>
+    """
+
+
+def _render_analysis_task_center(tasks: list[dict[str, Any]]) -> str:
+    rows = "".join(
+        f"""
+        <a class="task-list-row" href="/analysis-tasks/{_esc(task['task_id'])}">
+          <span class="state-label">{_esc('队列 ' + str(task['queue_position']) if task.get('queue_position') else '历史')}</span>
+          <strong>{_esc(task['name'])}</strong>
+          <span>{_esc(str(task['processed_count']))}/{_esc(str(task['total_count']))} 张</span>
+          <span>{_esc(task.get('created_at') or '-')}</span>
+        </a>
+        """
+        for task in tasks
+    ) or '<p class="settings-empty">暂无分析任务。</p>'
+    return f"""
+    <section class="screen task-center-screen" data-task-center aria-labelledby="task-center-title">
+      <div class="section-heading"><div><p class="kicker">Task Center</p><h2 id="task-center-title">分析任务中心</h2><p>队列、进度和失败项会在此处保持同步。</p></div><a class="primary-button" href="/library">新建分析任务</a></div>
+      <div class="task-center-status"><span data-task-sync-state>数据每 2 秒更新</span><button class="button" type="button" data-notification-toggle>通知 <strong data-notification-count>0</strong></button></div>
+      <section class="notification-panel" data-notification-panel hidden aria-live="polite"></section>
+      <section class="task-list" data-task-list>{rows}</section>
+    </section>
+    """
+
+
+def _render_scan_task_page(task: dict[str, Any]) -> str:
+    return f"""
+    <section class="screen" aria-labelledby="scan-task-title">
+      <div class="section-heading"><div><p class="kicker">Scan Task</p><h2 id="scan-task-title">素材扫描 #{_esc(task['id'])}</h2></div><a class="button" href="/library">返回素材库</a></div>
+      <section class="task-created-panel"><div><span class="state-label">{_esc(task['status'])}</span><h3>扫描结果</h3><p>{_esc('、'.join(task.get('trigger_sources') or [])) or '手动触发'} · {_esc(task.get('finished_at') or task.get('started_at') or '等待执行')}</p></div>
+      <dl><div><dt>发现</dt><dd>{_esc(str(task.get('discovered_count') or 0))}</dd></div><div><dt>可读</dt><dd>{_esc(str(task.get('readable_count') or 0))}</dd></div><div><dt>不可读</dt><dd>{_esc(str(task.get('unreadable_count') or 0))}</dd></div><div><dt>缺失</dt><dd>{_esc(str(task.get('missing_count') or 0))}</dd></div></dl></section>
+      <section class="task-strategy-panel"><h3>状态说明</h3><p>{_esc(_safe_task_error(task.get('error_message')) or '扫描已完成。')}</p></section>
     </section>
     """
 
@@ -1327,6 +1384,7 @@ def create_app(
     )
     provider_client = model_provider or ModelProviderClient()
     analysis_task_service = AnalysisTaskService(db, settings_store)
+    notification_store = NotificationStore(db)
     auth = WebAuth(
         db,
         initial_password=(
@@ -1352,6 +1410,7 @@ def create_app(
     app.extensions["web_auth"] = auth
     app.extensions["settings_store"] = settings_store
     app.extensions["analysis_task_service"] = analysis_task_service
+    app.extensions["notification_store"] = notification_store
     should_start_analysis_worker = (
         bool(_config_value("ANALYSIS_WORKER_ENABLED", True)) and db_path is None
         if analysis_worker_enabled is None
@@ -1666,6 +1725,13 @@ def create_app(
             abort(404)
         return jsonify({"ok": True, "task": task})
 
+    @app.get("/library/scans/<int:task_id>")
+    def library_scan_detail(task_id: int):
+        task = scan_coordinator.task(task_id)
+        if task is None:
+            abort(404)
+        return _page("InkTime 素材扫描", _render_scan_task_page(task), active="library")
+
     @app.post("/api/library/selection-preview")
     def api_library_selection_preview():
         try:
@@ -1681,6 +1747,30 @@ def create_app(
         except AnalysisTaskError as exc:
             return jsonify({"ok": False, "error": str(exc), "code": exc.code}), exc.status
         return jsonify({"ok": True, "task": task}), 201
+
+    @app.get("/api/analysis-tasks")
+    def api_analysis_tasks_list():
+        return jsonify({"ok": True, "tasks": analysis_task_service.list_tasks()})
+
+    @app.get("/api/notifications")
+    def api_notifications_list():
+        return jsonify({"ok": True, "notifications": notification_store.list_recent()})
+
+    @app.post("/api/notifications/<int:notification_id>/read")
+    def api_notifications_mark_read(notification_id: int):
+        if not notification_store.mark_read(notification_id):
+            abort(404)
+        return jsonify({"ok": True})
+
+    @app.get("/api/analysis-tasks/<int:task_id>/snapshot")
+    def api_analysis_task_snapshot(task_id: int):
+        task = analysis_task_service.get_task(task_id)
+        if task is None:
+            abort(404)
+        items = analysis_task_service.get_task_items(task_id)
+        for item in items:
+            item["error_message"] = _safe_task_error(item.get("error_message"))
+        return jsonify({"ok": True, "task": task, "items": items})
 
     @app.post("/api/analysis-tasks/<int:task_id>/control")
     def api_analysis_task_control(task_id: int):
@@ -1719,10 +1809,21 @@ def create_app(
         task = analysis_task_service.get_task(task_id)
         if task is None:
             abort(404)
+        items = analysis_task_service.get_task_items(task_id)
+        for item in items:
+            item["error_message"] = _safe_task_error(item.get("error_message"))
         return _page(
             f"InkTime 分析任务 #{task_id}",
-            _render_analysis_task_page(task),
-            active="library",
+            _render_analysis_task_page(task, items),
+            active="tasks",
+        )
+
+    @app.get("/analysis-tasks")
+    def analysis_task_center():
+        return _page(
+            "InkTime 分析任务中心",
+            _render_analysis_task_center(analysis_task_service.list_tasks()),
+            active="tasks",
         )
 
     @app.get("/gallery")

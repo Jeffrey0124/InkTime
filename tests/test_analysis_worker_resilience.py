@@ -103,6 +103,14 @@ class AnalysisWorkerResilienceTests(unittest.TestCase):
         paused = self.tasks.get_task(task["task_id"])
         self.assertEqual(paused["status"], "paused")
         self.assertIn("全部模型", paused["pause_reason"])
+        conn = sqlite3.connect(self.db_path)
+        try:
+            notification = conn.execute(
+                "SELECT kind, target_url FROM notifications WHERE kind='analysis_channels_paused'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(notification, ("analysis_channels_paused", f"/analysis-tasks/{task['task_id']}"))
         self.tasks.control_task(task["task_id"], "resume")
         resumed = AnalysisWorker(self.db_path, self.result).run_once()
         self.assertEqual(resumed["status"], "completed")
