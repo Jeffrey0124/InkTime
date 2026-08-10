@@ -379,6 +379,7 @@ def write_latest_files(
     *,
     settings: PushSettings,
     trigger_type: str,
+    apply_saved_overrides: bool = True,
     slot: str | None = None,
     note: str | None = None,
     now: dt.datetime | None = None,
@@ -387,7 +388,11 @@ def write_latest_files(
     settings.push_output_dir.mkdir(parents=True, exist_ok=True)
     published_at = _now(settings, now)
 
-    effective_item = _with_saved_overrides(item, settings.db_path)
+    effective_item = (
+        _with_saved_overrides(item, settings.db_path)
+        if apply_saved_overrides
+        else dict(item)
+    )
     rendered = build_push_image(effective_item, settings)
     manual_crop = _json_object(effective_item.get("manual_crop_json"))
     render_overrides = normalize_render_overrides(effective_item.get("render_overrides_json"))

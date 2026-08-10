@@ -494,6 +494,30 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertEqual(unauthorized.status_code, 401)
                 unauthorized.close()
 
+                draft = client.post(
+                    f"/api/photos/{photo['photo_id']}/push-draft",
+                    json={
+                        "custom_side_caption": "本次推送草稿",
+                        "manual_crop_json": {
+                            "offset_x": 3,
+                            "offset_y": 7,
+                            "scale": 1.1,
+                            "rotation": 0,
+                            "fit_mode": "fill",
+                        },
+                        "render_overrides_json": {
+                            "frame_orientation": "portrait",
+                            "show_caption": True,
+                            "show_date": True,
+                            "show_location": True,
+                            "dither_enabled": True,
+                            "dither_type": "atkinson",
+                        },
+                    },
+                )
+                self.assertEqual(draft.status_code, 200)
+                draft.close()
+
                 pushed = client.post(
                     f"/api/photos/{photo['photo_id']}/push",
                     headers={"X-Push-Token": "secret"},
@@ -501,12 +525,12 @@ class ServerRoutesTests(unittest.TestCase):
                 self.assertEqual(pushed.status_code, 200)
                 pushed_payload = pushed.get_json()
                 self.assertTrue(pushed_payload["ok"])
-                self.assertEqual(pushed_payload["manifest"]["manual_crop"]["rotation"], 90)
-                self.assertEqual(pushed_payload["manifest"]["render_width"], 800)
-                self.assertEqual(pushed_payload["manifest"]["render_height"], 480)
+                self.assertEqual(pushed_payload["manifest"]["manual_crop"]["rotation"], 0)
+                self.assertEqual(pushed_payload["manifest"]["render_width"], 480)
+                self.assertEqual(pushed_payload["manifest"]["render_height"], 800)
                 self.assertEqual(
                     pushed_payload["manifest"]["render_overrides"]["dither_type"],
-                    "stucki",
+                    "atkinson",
                 )
                 self.assertTrue((push_dir / "latest.bmp").exists())
                 self.assertTrue((push_dir / "latest.png").exists())
