@@ -23,6 +23,7 @@ from asset_maintenance import AssetMaintenance
 
 from analysis_tasks import AnalysisTaskError, AnalysisTaskService
 from analysis_worker import AnalysisWorker, AnalysisWorkerRunner, LegacyAnalysisExecutor
+from analysis_versions import AnalysisVersionError, AnalysisVersionService
 from notifications import NotificationStore
 from photo_identity import ensure_photo_identity_schema
 from model_provider import ModelProviderClient
@@ -1153,7 +1154,7 @@ def _render_push_studio_placeholder(photo: dict[str, Any]) -> str:
         if part
     )
     return f"""
-    <section class="screen studio-screen" data-push-studio data-display-defaults-version="2" data-photo-id="{_esc(photo.get("photo_id"))}" data-save-url="/api/photos/{_esc(photo.get("photo_id"))}/overrides" data-push-url="/api/photos/{_esc(photo.get("photo_id"))}/push" data-source-url="{_esc(photo.get("source_url"))}" data-crop="{_json_attr(crop)}" data-render="{_json_attr(render_overrides)}" data-date="{_esc(exif_date)}" data-location="{_esc(exif_city)}">
+    <section class="screen studio-screen" data-push-studio data-display-defaults-version="2" data-photo-id="{_esc(photo.get("photo_id"))}" data-save-url="/api/photos/{_esc(photo.get("photo_id"))}/push-draft" data-push-url="/api/photos/{_esc(photo.get("photo_id"))}/push" data-source-url="{_esc(photo.get("source_url"))}" data-crop="{_json_attr(crop)}" data-render="{_json_attr(render_overrides)}" data-date="{_esc(exif_date)}" data-location="{_esc(exif_city)}">
       <div class="studio-head">
         <div>
         <p class="status-kicker">Push Studio</p>
@@ -1384,6 +1385,7 @@ def create_app(
     )
     provider_client = model_provider or ModelProviderClient()
     analysis_task_service = AnalysisTaskService(db, settings_store)
+    analysis_version_service = AnalysisVersionService(db)
     notification_store = NotificationStore(db)
     auth = WebAuth(
         db,
@@ -1410,6 +1412,7 @@ def create_app(
     app.extensions["web_auth"] = auth
     app.extensions["settings_store"] = settings_store
     app.extensions["analysis_task_service"] = analysis_task_service
+    app.extensions["analysis_version_service"] = analysis_version_service
     app.extensions["notification_store"] = notification_store
     should_start_analysis_worker = (
         bool(_config_value("ANALYSIS_WORKER_ENABLED", True)) and db_path is None
@@ -1963,6 +1966,51 @@ def create_app(
             }
         )
 
+    @app.get("/api/photos/<int:photo_id>/analysis-versions")
+    def api_analysis_versions(photo_id: int):
+        return jsonify({"ok": True, "versions": analysis_version_service.list(photo_id)})
+
+    @app.route("/api/photos/<int:photo_id>/push-draft", methods=["POST", "PATCH"])
+    def save_push_draft(photo_id: int):
+        if load_photo(db, photo_id) is None:
+            abort(404)
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+        caption = str(payload.get("custom_side_caption") or "").strip()
+        crop = _json_object(payload.get("manual_crop_json"))
+        render = _json_object(payload.get("render_overrides_json"))
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "INSERT INTO push_drafts(photo_id, caption, manual_crop_json, render_overrides_json, updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(photo_id) DO UPDATE SET caption=excluded.caption, manual_crop_json=excluded.manual_crop_json, render_overrides_json=excluded.render_overrides_json, updated_at=excluded.updated_at",
+                (photo_id, caption or None, json.dumps(crop, ensure_ascii=False, sort_keys=True), json.dumps(render, ensure_ascii=False, sort_keys=True), _utc_now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return jsonify({"ok": True, "photo_id": photo_id, "caption": caption})
+
+    @app.post("/api/photos/<int:photo_id>/analysis-versions/compare")
+    def api_analysis_versions_compare(photo_id: int):
+        payload = request.get_json(silent=True) or {}
+        try:
+            comparison = analysis_version_service.compare(
+                photo_id, int(payload.get("left_version_id")), int(payload.get("right_version_id"))
+            )
+        except (AnalysisVersionError, TypeError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc) or "版本参数无效"}), 400
+        return jsonify({"ok": True, "comparison": comparison})
+
+    @app.post("/api/photos/<int:photo_id>/analysis-versions/<int:version_id>/restore")
+    def api_analysis_versions_restore(photo_id: int, version_id: int):
+        try:
+            restored = analysis_version_service.restore(photo_id, version_id)
+        except AnalysisVersionError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        return jsonify({"ok": True, **restored})
+
     @app.post("/api/photos/<int:photo_id>/push")
     def push_photo(photo_id: int):
         auth_error = push_token_error()
@@ -1972,10 +2020,19 @@ def create_app(
         if photo is None or not photo.get("exists_on_disk"):
             abort(404)
         item = dict(photo)
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        try:
+            draft = conn.execute("SELECT caption, manual_crop_json, render_overrides_json FROM push_drafts WHERE photo_id=?", (photo_id,)).fetchone()
+        finally:
+            conn.close()
         item["source_path"] = str(photo.get("path") or "")
         item["side_caption"] = str(
-            photo.get("custom_side_caption") or photo.get("side_caption") or ""
+            (draft["caption"] if draft and draft["caption"] else photo.get("custom_side_caption")) or photo.get("side_caption") or ""
         )
+        if draft is not None:
+            item["manual_crop_json"] = draft["manual_crop_json"] or ""
+            item["render_overrides_json"] = draft["render_overrides_json"] or ""
         item["crop_focus"] = _json_object(photo.get("crop_focus_json"))
         settings = settings_from_config(
             db_path=db,
