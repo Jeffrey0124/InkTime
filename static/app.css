@@ -846,6 +846,29 @@ h3 {
   overflow-x: auto;
 }
 
+.analysis-versions {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.analysis-versions h3,
+.analysis-versions p { margin: 0; }
+
+.version-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.version-actions:last-child { grid-template-columns: 1fr auto; }
+
+.version-actions label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.version-result { padding: 10px; background: #f1f8f3; color: var(--muted); font-size: 13px; }
+
 .visually-hidden {
   position: absolute;
   width: 1px;

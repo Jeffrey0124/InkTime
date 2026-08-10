@@ -1037,7 +1037,7 @@ def _render_gallery_page(photos: list[dict[str, Any]], *, sort: str, limit: int)
     """
 
 
-def _render_photo_database_detail(photo: dict[str, Any]) -> str:
+def _render_photo_database_detail(photo: dict[str, Any], versions: list[dict[str, Any]] | None = None) -> str:
     can_manage = bool(getattr(g, "is_admin", True))
     meta = " · ".join(
         part
@@ -1077,6 +1077,19 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
         if can_manage
         else ""
     )
+    version_rows = "".join(
+        f'<option value="{_esc(version["id"])}">v{_esc(version["version_number"])} · {_esc(version["analysis_channel"] or "-")} · {_esc(version["created_at"] or "-")}</option>'
+        for version in versions or []
+    )
+    versions_panel = (
+        f'''<section class="analysis-versions" data-analysis-versions data-photo-id="{_esc(photo.get("photo_id"))}">
+          <h3>分析版本</h3><p class="small">AI 结果与 EXIF 保持不可变；恢复只切换当前版本。</p>
+          <div class="version-actions"><label>比较左侧<select data-version-left>{version_rows}</select></label><label>比较右侧<select data-version-right>{version_rows}</select></label><button class="button" type="button" data-version-compare>比较</button></div>
+          <div class="version-result" data-version-result aria-live="polite">选择两个版本查看差异。</div>
+          <div class="version-actions"><label>恢复版本<select data-version-restore>{version_rows}</select></label><button class="button" type="button" data-version-restore-button>恢复为当前版本</button></div>
+        </section>'''
+        if can_manage and versions else ""
+    )
     return f"""
     <section class="screen photo-detail-screen">
       <div class="detail-page-head">
@@ -1111,6 +1124,7 @@ def _render_photo_database_detail(photo: dict[str, Any]) -> str:
             <div class="muted">{_esc(photo.get("reason"))}</div>
           </div>
           {caption_editor}
+          {versions_panel}
         </aside>
       </section>
     </section>
@@ -2064,7 +2078,7 @@ def create_app(
             abort(404)
         return _page(
             "照片详情",
-            _render_photo_database_detail(_public_photo(photo)),
+            _render_photo_database_detail(_public_photo(photo), analysis_version_service.list(photo_id)),
             active="gallery",
         )
 
