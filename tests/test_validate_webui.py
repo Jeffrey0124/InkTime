@@ -59,7 +59,7 @@ class _ValidationHandler(BaseHTTPRequestHandler):
             )
         elif path == "/push/latest.png":
             self._send("image/png", b"png-preview")
-        elif path in {"/", "/gallery", "/photos/7", "/push-studio/7"}:
+        elif path in {"/", "/gallery", "/library", "/analysis-tasks", "/photos/7", "/push-studio/7"}:
             self._send("text/html; charset=utf-8", b"<html>InkTime</html>")
         else:
             self.send_error(404)
@@ -112,6 +112,8 @@ class ValidateWebUITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS: WebUI routes and push artifact", result.stdout)
         self.assertIn("/api/photos?limit=1", _ValidationHandler.requested_paths)
+        self.assertIn("/library", _ValidationHandler.requested_paths)
+        self.assertIn("/analysis-tasks", _ValidationHandler.requested_paths)
         self.assertIn("/photos/7", _ValidationHandler.requested_paths)
         self.assertIn("/push-studio/7", _ValidationHandler.requested_paths)
 

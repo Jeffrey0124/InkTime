@@ -28,6 +28,8 @@ ROUTES = (
     "/healthz",
     "/",
     "/gallery",
+    "/library",
+    "/analysis-tasks",
     "/api/photos?limit=1",
     "/push/latest.png",
     "/push/latest.bmp",

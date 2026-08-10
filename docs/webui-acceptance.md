@@ -29,6 +29,8 @@ python scripts/validate_webui.py --base-url http://127.0.0.1:8766
 - `/healthz`
 - `/`
 - `/gallery`
+- `/library`
+- `/analysis-tasks`
 - `/api/photos?limit=1`
 - `/photos/<photo_id>`
 - `/push-studio/<photo_id>`
