@@ -53,6 +53,9 @@ AUTH_COOKIE_SECURE = os.environ.get("INKTIME_AUTH_COOKIE_SECURE", "false").lower
 }
 # 设置页数据库凭据的加密主密钥。留空时禁止向数据库保存 API Key。
 SETTINGS_MASTER_KEY = os.environ.get("INKTIME_SETTINGS_MASTER_KEY", "")
+# 同一 WebUI 的两个完整来源地址；仅用于管理员手动切换，不自动探测网络。
+INKTIME_INTERNAL_ENTRY_URL = os.environ.get("INKTIME_INTERNAL_ENTRY_URL", "")
+INKTIME_EXTERNAL_ENTRY_URL = os.environ.get("INKTIME_EXTERNAL_ENTRY_URL", "")
 DISPLAY_PREVIEW_DIR = "./output/previews"
 
 # 素材库扫描：启动时扫描一次，并按间隔复扫。自定义排除规则相对于 IMAGE_DIR。

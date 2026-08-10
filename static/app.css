@@ -883,6 +883,10 @@ h3 {
 .analysis-version-summary dt, .analysis-version-summary dd { margin: 0; font-size: 12px; }
 .analysis-version-summary dt { color: var(--muted); }
 
+.entry-switcher { display: flex; gap: 4px; margin-bottom: 10px; }
+.entry-switcher a { padding: 5px 8px; color: var(--muted); border: 1px solid #455045; text-decoration: none; }
+.entry-switcher a.active { color: var(--ink); background: #f2f7ef; border-color: #f2f7ef; }
+
 .version-actions {
   display: grid;
   grid-template-columns: 1fr 1fr auto;

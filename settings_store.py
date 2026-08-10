@@ -18,6 +18,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from access_entries import AccessEntryError, normalize_entry_url
 from photo_identity import ensure_photo_identity_schema
 
 
@@ -321,6 +322,13 @@ class SettingsStore:
     def save_section(self, section: str, payload: dict[str, Any]) -> dict[str, Any]:
         if section not in {"analysis_defaults", "scan_settings", "security_settings"}:
             raise SettingsError("不支持的设置区")
+        if section == "security_settings":
+            payload = dict(payload)
+            try:
+                for key in ("internal_entry_url", "external_entry_url"):
+                    payload[key] = normalize_entry_url(payload.get(key))
+            except AccessEntryError as exc:
+                raise SettingsError(str(exc)) from exc
         with self._connect() as conn:
             version = self._append_settings_version(conn, section, payload)
             conn.execute("INSERT INTO app_settings(key,value_json,version,updated_at) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,version=excluded.version,updated_at=excluded.updated_at", (section, _dump(payload), version, _now()))
