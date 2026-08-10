@@ -4,11 +4,18 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from unittest.mock import patch
 
 from web_queries import load_photo
 
 
 class WebLocationTests(unittest.TestCase):
+    def test_stale_monitor_mount_is_treated_as_unavailable(self):
+        from web_queries import _count_monitor_files
+
+        with patch.object(Path, "exists", side_effect=OSError(116, "Stale file handle")):
+            self.assertEqual(_count_monitor_files(Path("/photos")), 0)
+
     def test_load_photo_hydrates_location_without_writing_during_get(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
