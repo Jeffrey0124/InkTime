@@ -506,6 +506,18 @@ def _recent_sources(settings: PushSettings, now: dt.datetime) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
+def _last_pushed_source(settings: PushSettings) -> str | None:
+    ensure_push_schema(settings.db_path)
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        row = conn.execute(
+            "SELECT source_path FROM push_history ORDER BY pushed_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    return str(row[0]) if row and row[0] else None
+
+
 def _daily_candidates(
     now: dt.datetime | None = None,
     *,
@@ -520,7 +532,15 @@ def _daily_candidates(
 
     recent = _recent_sources(active_settings, current)
     fresh = [item for item in candidates if str(item.get("source_path") or "") not in recent]
-    pool = fresh or candidates
+    if fresh:
+        pool = fresh
+    elif len(candidates) > 1:
+        # 排除期耗尽时仍避免连续两个时段发布同一张图。
+        last_source = _last_pushed_source(active_settings)
+        pool = [item for item in candidates if str(item.get("source_path") or "") != last_source]
+        pool = pool or candidates
+    else:
+        pool = candidates
 
     today = current.date()
 
